@@ -1,0 +1,64 @@
+using UnityEngine;
+
+public class PlayerCamera : MonoBehaviour
+{
+    [Header("Mouse Sensitivity")]
+    public float mouseSensitivity = 2f;
+
+    [Header("Vertical Limits")]
+    public float minYLook = -90f;
+    public float maxYLook = 90f;
+
+    [Header("Smoothing")]
+    public bool smoothMovement = true;
+    public float smoothTime = 0.01f;
+
+    private float xRotation = 0f;
+    private float yRotation = 0f;
+    private float currentXRotation = 0f;
+    private float currentYRotation = 0f;
+    private float xRotationVelocity = 0f;
+    private float yRotationVelocity = 0f;
+
+    void Start()
+    {
+        // Lock and hide cursor
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
+
+        // Store initial rotation
+        xRotation = transform.localRotation.eulerAngles.x;
+        yRotation = transform.parent.rotation.eulerAngles.y;
+    }
+
+    void Update()
+    {
+        // Get mouse input
+        float mouseX = Input.GetAxis("Mouse X") * mouseSensitivity;
+        float mouseY = Input.GetAxis("Mouse Y") * mouseSensitivity;
+
+        // Calculate target rotations
+        yRotation += mouseX;
+        xRotation -= mouseY;
+
+        // Clamp vertical rotation
+        xRotation = Mathf.Clamp(xRotation, minYLook, maxYLook);
+
+        if (smoothMovement)
+        {
+            // Smooth rotation
+            currentXRotation = Mathf.SmoothDamp(currentXRotation, xRotation, ref xRotationVelocity, smoothTime);
+            currentYRotation = Mathf.SmoothDamp(currentYRotation, yRotation, ref yRotationVelocity, smoothTime);
+
+            // Apply rotations
+            transform.localRotation = Quaternion.Euler(currentXRotation, 0f, 0f);
+            transform.parent.rotation = Quaternion.Euler(0f, currentYRotation, 0f);
+        }
+        else
+        {
+            // Instant rotation
+            transform.localRotation = Quaternion.Euler(xRotation, 0f, 0f);
+            transform.parent.rotation = Quaternion.Euler(0f, yRotation, 0f);
+        }
+    }
+}
