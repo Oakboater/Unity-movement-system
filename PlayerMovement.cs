@@ -10,6 +10,7 @@ public class PlayerMovement : MonoBehaviour
     public float slideDuration = 1.25f;
     public float slideCooldown = 0.5f;
     public float slideBoost = 3f;
+    public float slideTransitionSpeed = 10f; // Smooth transition into slide
 
     [Header("Camera Settings")]
     public Camera playerCamera;
@@ -36,6 +37,9 @@ public class PlayerMovement : MonoBehaviour
     private float originalCenterY;
     private float originalCameraHeight;
     private float currentFOV;
+    private float currentSlideHeight;
+    private float currentCameraHeight;
+    private float slideStartTime;
 
     void Start()
     {
@@ -57,7 +61,10 @@ public class PlayerMovement : MonoBehaviour
             originalCameraHeight = cameraTransform.localPosition.y;
             currentFOV = normalFOV;
             playerCamera.fieldOfView = normalFOV;
+            currentCameraHeight = originalCameraHeight;
         }
+
+        currentSlideHeight = originalHeight;
 
         Debug.Log("PlayerMovement initialized");
     }
@@ -84,14 +91,24 @@ public class PlayerMovement : MonoBehaviour
         float vertical = Input.GetAxis("Vertical");
         bool hasMovementInput = (horizontal != 0 || vertical != 0);
 
-        // Slide input (hold Left Control)
+        // Slide input - more responsive
         bool slideInput = Input.GetKey(KeyCode.LeftControl);
+        bool slideJustPressed = Input.GetKeyDown(KeyCode.LeftControl);
         bool jumpInput = Input.GetButtonDown("Jump");
 
-        // Handle slide initiation
+        // Handle slide initiation - immediate but smooth
         if (!isSliding && slideInput && isGrounded && slideCooldownTimer <= 0 && hasMovementInput)
         {
-            StartSlide(horizontal, vertical);
+            if (slideJustPressed || !isSliding)
+            {
+                StartSlide(horizontal, vertical);
+            }
+        }
+
+        // Handle slide release (optional - can make slide stop when releasing key)
+        if (isSliding && !slideInput)
+        {
+            EndSlide();
         }
 
         // Handle jump to cancel slide
@@ -100,13 +117,48 @@ public class PlayerMovement : MonoBehaviour
             CancelSlide();
         }
 
-        // Handle slide logic
+        // Smooth transitions for slide state
         if (isSliding)
         {
             UpdateSlide();
+
+            // Smoothly transition height and camera position
+            float targetHeight = originalHeight * 0.6f;
+            float targetCameraHeight = originalCameraHeight * 0.6f;
+
+            currentSlideHeight = Mathf.Lerp(currentSlideHeight, targetHeight, Time.deltaTime * slideTransitionSpeed);
+            currentCameraHeight = Mathf.Lerp(currentCameraHeight, targetCameraHeight, Time.deltaTime * slideTransitionSpeed);
+
+            controller.height = currentSlideHeight;
+            controller.center = new Vector3(0, currentSlideHeight * 0.5f, 0);
+
+            if (playerCamera != null)
+            {
+                cameraTransform.localPosition = new Vector3(
+                    cameraTransform.localPosition.x,
+                    currentCameraHeight,
+                    cameraTransform.localPosition.z
+                );
+            }
         }
         else
         {
+            // Smoothly transition back to normal
+            currentSlideHeight = Mathf.Lerp(currentSlideHeight, originalHeight, Time.deltaTime * slideTransitionSpeed);
+            currentCameraHeight = Mathf.Lerp(currentCameraHeight, originalCameraHeight, Time.deltaTime * slideTransitionSpeed);
+
+            controller.height = currentSlideHeight;
+            controller.center = new Vector3(0, currentSlideHeight * 0.5f, 0);
+
+            if (playerCamera != null)
+            {
+                cameraTransform.localPosition = new Vector3(
+                    cameraTransform.localPosition.x,
+                    currentCameraHeight,
+                    cameraTransform.localPosition.z
+                );
+            }
+
             // Normal movement - only move if there's input
             if (hasMovementInput)
             {
@@ -163,6 +215,7 @@ public class PlayerMovement : MonoBehaviour
     {
         isSliding = true;
         slideTimer = slideDuration;
+        slideStartTime = Time.time;
 
         // Get current movement direction and speed
         float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
@@ -178,31 +231,28 @@ public class PlayerMovement : MonoBehaviour
             right.Normalize();
 
             slideDirection = (forward * vertical) + (right * horizontal);
+
+            // If there's no input, slide forward
+            if (slideDirection.magnitude < 0.1f)
+            {
+                slideDirection = forward;
+            }
+
             slideDirection.Normalize();
         }
 
-        // Calculate slide speed: initial momentum + boost
+        // Calculate slide speed with boost
         float initialSpeed = Mathf.Max(currentHorizontalSpeed, walkSpeed);
         float slideStartSpeed = initialSpeed + slideBoost;
 
-        // Apply slide velocity
+        // Apply slide velocity with smooth start
         velocity = new Vector3(slideDirection.x, velocity.y, slideDirection.z) * slideStartSpeed;
 
-        // Reduce character controller height for sliding
-        controller.height = originalHeight * 0.6f;
-        controller.center = new Vector3(0, originalCenterY * 0.6f, 0);
+        // Store current speeds for smooth transition
+        currentSlideHeight = controller.height;
+        currentCameraHeight = cameraTransform != null ? cameraTransform.localPosition.y : originalCameraHeight;
 
-        // Lower camera position for sliding
-        if (playerCamera != null)
-        {
-            cameraTransform.localPosition = new Vector3(
-                cameraTransform.localPosition.x,
-                originalCameraHeight * 0.6f,
-                cameraTransform.localPosition.z
-            );
-        }
-
-        Debug.Log($"Slide started! Speed: {slideStartSpeed}");
+        Debug.Log($"Slide started smoothly! Speed: {slideStartSpeed}");
     }
 
     void UpdateSlide()
@@ -210,9 +260,11 @@ public class PlayerMovement : MonoBehaviour
         // Update slide timer
         slideTimer -= Time.deltaTime;
 
-        // Calculate current slide speed (smooth deceleration)
+        // Smooth deceleration curve (ease out)
         float t = 1 - (slideTimer / slideDuration);
-        float currentSlideSpeed = Mathf.Lerp(walkSpeed + slideBoost, walkSpeed * 0.8f, t);
+        float smoothT = 1 - Mathf.Pow(1 - t, 2); // Ease out curve
+
+        float currentSlideSpeed = Mathf.Lerp(walkSpeed + slideBoost, walkSpeed * 0.8f, smoothT);
 
         // Apply slide movement
         controller.Move(slideDirection * currentSlideSpeed * Time.deltaTime);
@@ -240,20 +292,6 @@ public class PlayerMovement : MonoBehaviour
         isSliding = false;
         slideCooldownTimer = slideCooldown;
 
-        // Restore character controller height
-        controller.height = originalHeight;
-        controller.center = new Vector3(0, originalCenterY, 0);
-
-        // Restore camera position
-        if (playerCamera != null)
-        {
-            cameraTransform.localPosition = new Vector3(
-                cameraTransform.localPosition.x,
-                originalCameraHeight,
-                cameraTransform.localPosition.z
-            );
-        }
-
         Debug.Log($"Slide cancelled with jump! Speed: {currentSpeed}");
     }
 
@@ -265,26 +303,12 @@ public class PlayerMovement : MonoBehaviour
         // Get current slide speed
         float currentSlideSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
 
-        // Restore character controller height
-        controller.height = originalHeight;
-        controller.center = new Vector3(0, originalCenterY, 0);
-
-        // Restore camera position
-        if (playerCamera != null)
-        {
-            cameraTransform.localPosition = new Vector3(
-                cameraTransform.localPosition.x,
-                originalCameraHeight,
-                cameraTransform.localPosition.z
-            );
-        }
-
-        // Set velocity to a reasonable speed, but not too fast
+        // Set velocity to a reasonable speed
         float endSpeed = Mathf.Min(currentSlideSpeed, walkSpeed * 1.2f);
         velocity.x = slideDirection.x * endSpeed;
         velocity.z = slideDirection.z * endSpeed;
 
-        Debug.Log($"Slide ended! Speed: {endSpeed}");
+        Debug.Log($"Slide ended smoothly!");
     }
 
     public bool IsRunning()
