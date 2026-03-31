@@ -24,11 +24,14 @@ public class PlayerMovement : MonoBehaviour
     public LayerMask wallLayer;
     public float wallCheckDistance = 0.8f;
     public float wallRunFOV = 75f;
+    public float wallRunSpeedBoost = 5f;
+    public float minWallRunSpeed = 8f; // Added: Minimum speed when starting wall run
+    public bool enableDebugLogs = false;
 
     [Header("Camera Settings")]
     public Camera playerCamera;
     public float normalFOV = 60f;
-    public float slideFOV = 75f;
+    public float slideFOV = 80f;
     public float fovTransitionSpeed = 8f;
 
     [Header("Gravity")]
@@ -68,6 +71,7 @@ public class PlayerMovement : MonoBehaviour
     private Vector3 wallNormal;
     private Vector3 wallRunDirection;
     private bool wallRunSide; // true = left, false = right
+    private bool hasWallRunBoosted;
 
     void Start()
     {
@@ -94,7 +98,7 @@ public class PlayerMovement : MonoBehaviour
         moveDirection = Vector3.zero;
         targetMoveDirection = Vector3.zero;
 
-        Debug.Log("PlayerMovement initialized");
+        if (enableDebugLogs) Debug.Log("PlayerMovement initialized");
     }
 
     void Update()
@@ -130,7 +134,7 @@ public class PlayerMovement : MonoBehaviour
                     hasMomentum = false;
                     momentumSpeed = 0;
                 }
-                else
+                else if (enableDebugLogs)
                 {
                     Debug.Log($"Momentum preserved on landing: {momentumSpeed:F1} m/s");
                 }
@@ -139,6 +143,7 @@ public class PlayerMovement : MonoBehaviour
             // End wall run when grounded
             if (isWallRunning) EndWallRun();
             wasJumpCancelled = false;
+            hasWallRunBoosted = false;
         }
 
         // Get input
@@ -216,7 +221,8 @@ public class PlayerMovement : MonoBehaviour
 
                 if (isGrounded)
                 {
-                    momentumSpeed = Mathf.Max(momentumSpeed - (Time.deltaTime * 5f), walkSpeed);
+                    // Apply deceleration only when grounded
+                    momentumSpeed = Mathf.Max(momentumSpeed - (Time.deltaTime * deceleration * 2f), walkSpeed);
                     currentSpeed = momentumSpeed;
                 }
 
@@ -300,7 +306,7 @@ public class PlayerMovement : MonoBehaviour
         if (jumpInput && isGrounded && !isSliding && !isWallRunning)
         {
             velocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
-            if (hasMomentum && momentumSpeed > walkSpeed)
+            if (hasMomentum && momentumSpeed > walkSpeed && enableDebugLogs)
             {
                 Debug.Log($"Jumped with momentum: {momentumSpeed:F1} m/s");
             }
@@ -317,9 +323,12 @@ public class PlayerMovement : MonoBehaviour
 
     void CheckForWallRun()
     {
-        // Only wall run if moving forward
+        // Only wall run if moving forward and have some minimum speed
         float vertical = Input.GetAxisRaw("Vertical");
-        if (vertical <= 0) return;
+        float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
+
+        // Require minimum speed to wall run (prevents buggy low-speed wall runs)
+        if (vertical <= 0 || currentHorizontalSpeed < 2f) return;
 
         // Check for walls on left and right
         Vector3 leftDir = -cameraTransform.right;
@@ -354,6 +363,7 @@ public class PlayerMovement : MonoBehaviour
         wallRunSide = isLeft;
         wallNormal = normal;
         wallRunTimer = wallRunDuration;
+        hasWallRunBoosted = false;
 
         // Calculate wall run direction (forward along the wall)
         Vector3 wallForward = Vector3.Cross(normal, Vector3.up);
@@ -364,9 +374,37 @@ public class PlayerMovement : MonoBehaviour
 
         wallRunDirection = wallForward.normalized;
 
-        // Set speed from momentum or default
+        // Get current horizontal speed
         float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
-        currentSpeed = Mathf.Max(currentHorizontalSpeed, wallRunSpeed);
+
+        // Apply speed boost only once per wall run
+        if (!hasWallRunBoosted)
+        {
+            hasWallRunBoosted = true;
+
+            // Calculate boosted speed
+            float boostedSpeed = currentHorizontalSpeed + wallRunSpeedBoost;
+
+            // Apply minimum speed if current speed is too low
+            if (currentHorizontalSpeed < minWallRunSpeed)
+            {
+                currentSpeed = minWallRunSpeed;
+            }
+            else
+            {
+                // Cap at wallRunSpeed
+                currentSpeed = Mathf.Min(boostedSpeed, wallRunSpeed);
+            }
+
+            if (enableDebugLogs)
+            {
+                Debug.Log($"Wall Run Started! Speed: {currentHorizontalSpeed:F1} -> {currentSpeed:F1} m/s (Boost: +{wallRunSpeedBoost}, Min: {minWallRunSpeed})");
+            }
+        }
+        else
+        {
+            currentSpeed = currentHorizontalSpeed;
+        }
 
         // Apply velocity along wall
         velocity.x = wallRunDirection.x * currentSpeed;
@@ -376,8 +414,6 @@ public class PlayerMovement : MonoBehaviour
         hasMomentum = true;
         momentumSpeed = currentSpeed;
         momentumDirection = wallRunDirection;
-
-        Debug.Log($"Wall Run Started! Speed: {currentSpeed:F1} m/s");
     }
 
     void UpdateWallRun()
@@ -396,18 +432,8 @@ public class PlayerMovement : MonoBehaviour
             return;
         }
 
-        // Get input for movement along wall
-        float vertical = Input.GetAxisRaw("Vertical");
-        float horizontal = Input.GetAxisRaw("Horizontal");
-
-        // Move along wall direction
+        // Maintain current speed during wall run
         Vector3 moveAlongWall = wallRunDirection * currentSpeed;
-
-        // Allow slight steering
-        if (vertical != 0)
-        {
-            moveAlongWall = wallRunDirection * currentSpeed;
-        }
 
         // Apply movement
         controller.Move(moveAlongWall * Time.deltaTime);
@@ -420,8 +446,10 @@ public class PlayerMovement : MonoBehaviour
         momentumSpeed = currentSpeed;
         momentumDirection = moveAlongWall.normalized;
 
-        // Visual debug
-        Debug.DrawRay(transform.position, wallRunDirection * 2f, Color.cyan);
+        if (enableDebugLogs)
+        {
+            Debug.DrawRay(transform.position, wallRunDirection * 2f, Color.cyan);
+        }
     }
 
     void WallRunJump()
@@ -442,13 +470,14 @@ public class PlayerMovement : MonoBehaviour
         EndWallRun();
         wallRunCooldownTimer = wallRunCooldown;
 
-        Debug.Log($"Wall Run Jump! Speed: {momentumSpeed:F1} m/s");
+        if (enableDebugLogs) Debug.Log($"Wall Run Jump! Speed: {momentumSpeed:F1} m/s");
     }
 
     void EndWallRun()
     {
         isWallRunning = false;
-        Debug.Log("Wall Run Ended");
+        hasWallRunBoosted = false;
+        if (enableDebugLogs) Debug.Log("Wall Run Ended");
     }
 
     void StartSlide(float horizontal, float vertical)
@@ -493,7 +522,7 @@ public class PlayerMovement : MonoBehaviour
         currentSlideHeight = controller.height;
         currentCameraHeight = cameraTransform != null ? cameraTransform.localPosition.y : originalCameraHeight;
 
-        Debug.Log($"Slide started! Speed: {slideStartSpeed:F1} m/s");
+        if (enableDebugLogs) Debug.Log($"Slide started! Speed: {slideStartSpeed:F1} m/s");
     }
 
     void UpdateSlide()
@@ -549,7 +578,7 @@ public class PlayerMovement : MonoBehaviour
             );
         }
 
-        Debug.Log($"Slide cancelled! Momentum: {momentumSpeed:F1} m/s");
+        if (enableDebugLogs) Debug.Log($"Slide cancelled! Momentum: {momentumSpeed:F1} m/s");
     }
 
     void EndSlide()
