@@ -14,6 +14,17 @@ public class PlayerMovement : MonoBehaviour
     public float slideBoost = 5f;
     public float slideTransitionSpeed = 10f;
 
+    [Header("Wall Run Settings")]
+    public bool enableWallRun = true;
+    public float wallRunSpeed = 15f;
+    public float wallRunGravity = -2f;
+    public float wallRunJumpForce = 8f;
+    public float wallRunDuration = 2f;
+    public float wallRunCooldown = 0.5f;
+    public LayerMask wallLayer;
+    public float wallCheckDistance = 1f;
+    public float wallRunFOV = 80f;
+
     [Header("Camera Settings")]
     public Camera playerCamera;
     public float normalFOV = 60f;
@@ -50,6 +61,15 @@ public class PlayerMovement : MonoBehaviour
     private Vector3 momentumDirection;
     private bool wasJumpCancelled;
 
+    // Wall run system
+    private bool isWallRunning;
+    private bool isWallRunningLeft;
+    private bool isWallRunningRight;
+    private float wallRunTimer;
+    private float wallRunCooldownTimer;
+    private Vector3 wallNormal;
+    private Vector3 wallRunDirection;
+
     void Start()
     {
         controller = GetComponent<CharacterController>();
@@ -80,14 +100,31 @@ public class PlayerMovement : MonoBehaviour
 
     void Update()
     {
-        // Update cooldown timer
+        // Update cooldown timers
         if (slideCooldownTimer > 0)
         {
             slideCooldownTimer -= Time.deltaTime;
         }
 
+        if (wallRunCooldownTimer > 0)
+        {
+            wallRunCooldownTimer -= Time.deltaTime;
+        }
+
         // Ground check
         bool isGrounded = controller.isGrounded;
+
+        // Wall run check
+        if (enableWallRun && !isSliding && !isGrounded && wallRunCooldownTimer <= 0 && !isWallRunning)
+        {
+            CheckForWallRun();
+        }
+
+        // Handle wall running
+        if (isWallRunning)
+        {
+            UpdateWallRun();
+        }
 
         // Reset velocity when grounded
         if (isGrounded && velocity.y < 0)
@@ -107,6 +144,12 @@ public class PlayerMovement : MonoBehaviour
                 {
                     Debug.Log($"Momentum preserved on landing: {momentumSpeed:F1} m/s");
                 }
+            }
+
+            // End wall run when grounded
+            if (isWallRunning)
+            {
+                EndWallRun();
             }
 
             wasJumpCancelled = false;
@@ -140,6 +183,12 @@ public class PlayerMovement : MonoBehaviour
             wasJumpCancelled = true;
         }
 
+        // Handle wall run jump
+        if (isWallRunning && jumpInput)
+        {
+            WallRunJump();
+        }
+
         // Smooth transitions for slide state
         if (isSliding)
         {
@@ -164,7 +213,7 @@ public class PlayerMovement : MonoBehaviour
                 );
             }
         }
-        else
+        else if (!isWallRunning)
         {
             // Smooth transition back to normal
             currentSlideHeight = Mathf.Lerp(currentSlideHeight, originalHeight, Time.deltaTime * slideTransitionSpeed);
@@ -182,7 +231,7 @@ public class PlayerMovement : MonoBehaviour
                 );
             }
 
-            // Movement logic with momentum priority
+            // Movement logic with momentum priority (only when not wall running)
             if (hasMomentum && momentumSpeed > walkSpeed && !isSliding)
             {
                 // Use momentum for movement - NO DECAY IN AIR!
@@ -194,7 +243,6 @@ public class PlayerMovement : MonoBehaviour
                     momentumSpeed = Mathf.Max(momentumSpeed - (Time.deltaTime * 5f), walkSpeed);
                     currentSpeed = momentumSpeed;
                 }
-                // In air: NO DECAY AT ALL - keep full speed
 
                 if (cameraTransform != null)
                 {
@@ -269,13 +317,16 @@ public class PlayerMovement : MonoBehaviour
         // Update camera FOV
         if (playerCamera != null)
         {
-            float targetFOV = isSliding ? slideFOV : normalFOV;
+            float targetFOV = normalFOV;
+            if (isSliding) targetFOV = slideFOV;
+            if (isWallRunning) targetFOV = wallRunFOV;
+
             currentFOV = Mathf.Lerp(currentFOV, targetFOV, Time.deltaTime * fovTransitionSpeed);
             playerCamera.fieldOfView = currentFOV;
         }
 
         // Jump - preserve momentum
-        if (jumpInput && isGrounded && !isSliding)
+        if (jumpInput && isGrounded && !isSliding && !isWallRunning)
         {
             velocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
 
@@ -285,15 +336,154 @@ public class PlayerMovement : MonoBehaviour
             }
         }
 
-        // Apply gravity
-        velocity.y += gravity * Time.deltaTime;
+        // Apply gravity (different when wall running)
+        if (!isWallRunning)
+        {
+            velocity.y += gravity * Time.deltaTime;
+        }
+        else
+        {
+            velocity.y += wallRunGravity * Time.deltaTime;
+        }
+
         controller.Move(velocity * Time.deltaTime);
 
         // Debug momentum in air
-        if (Time.frameCount % 60 == 0 && hasMomentum && !isGrounded)
+        if (Time.frameCount % 60 == 0 && hasMomentum && !isGrounded && !isWallRunning)
         {
             Debug.Log($"Momentum in air: {momentumSpeed:F1} m/s - NO DECAY!");
         }
+    }
+
+    void CheckForWallRun()
+    {
+        // Check for walls on left and right
+        Vector3 leftDir = -cameraTransform.right;
+        Vector3 rightDir = cameraTransform.right;
+
+        RaycastHit leftHit, rightHit;
+        bool leftWall = Physics.Raycast(transform.position, leftDir, out leftHit, wallCheckDistance, wallLayer);
+        bool rightWall = Physics.Raycast(transform.position, rightDir, out rightHit, wallCheckDistance, wallLayer);
+
+        // Only wall run if moving forward
+        float vertical = Input.GetAxisRaw("Vertical");
+
+        if (vertical > 0)
+        {
+            if (leftWall && !rightWall)
+            {
+                StartWallRun(leftHit.normal, true);
+            }
+            else if (rightWall && !leftWall)
+            {
+                StartWallRun(rightHit.normal, false);
+            }
+        }
+    }
+
+    void StartWallRun(Vector3 normal, bool isLeft)
+    {
+        isWallRunning = true;
+        isWallRunningLeft = isLeft;
+        isWallRunningRight = !isLeft;
+        wallNormal = normal;
+        wallRunTimer = wallRunDuration;
+
+        // Calculate wall run direction (along the wall)
+        Vector3 wallForward = Vector3.Cross(normal, Vector3.up);
+        wallRunDirection = wallForward;
+
+        // Apply wall run speed
+        currentSpeed = wallRunSpeed;
+        hasMomentum = true;
+        momentumSpeed = wallRunSpeed;
+        momentumDirection = wallRunDirection;
+
+        // Apply slight push away from wall
+        Vector3 pushAway = normal * 0.5f;
+        controller.Move(pushAway);
+
+        // Tilt camera slightly for wall run effect
+        if (playerCamera != null)
+        {
+            // Optional: Add camera tilt effect
+        }
+
+        Debug.Log($"Wall run started! Direction: {(isLeft ? "Left" : "Right")}");
+    }
+
+    void UpdateWallRun()
+    {
+        // Update timer
+        wallRunTimer -= Time.deltaTime;
+
+        // Check if still next to wall
+        Vector3 checkDir = isWallRunningLeft ? -cameraTransform.right : cameraTransform.right;
+        RaycastHit hit;
+        bool stillNextToWall = Physics.Raycast(transform.position, checkDir, out hit, wallCheckDistance + 0.2f, wallLayer);
+
+        if (!stillNextToWall || wallRunTimer <= 0)
+        {
+            EndWallRun();
+            return;
+        }
+
+        // Move along the wall
+        float vertical = Input.GetAxisRaw("Vertical");
+        Vector3 moveAlongWall = wallRunDirection * currentSpeed;
+
+        // Allow slight control
+        if (vertical != 0)
+        {
+            moveAlongWall = wallRunDirection * currentSpeed * Mathf.Abs(vertical);
+        }
+
+        controller.Move(moveAlongWall * Time.deltaTime);
+
+        // Update velocity
+        velocity.x = moveAlongWall.x;
+        velocity.z = moveAlongWall.z;
+
+        // Update momentum
+        momentumSpeed = currentSpeed;
+        momentumDirection = moveAlongWall.normalized;
+    }
+
+    void WallRunJump()
+    {
+        // Jump away from wall
+        Vector3 jumpDirection = wallNormal + Vector3.up;
+        jumpDirection.Normalize();
+
+        velocity = jumpDirection * wallRunJumpForce;
+
+        // Preserve horizontal momentum
+        hasMomentum = true;
+        momentumSpeed = wallRunSpeed;
+        momentumDirection = wallRunDirection;
+
+        // End wall run
+        EndWallRun();
+        wallRunCooldownTimer = wallRunCooldown;
+
+        Debug.Log($"Wall run jump! Speed: {wallRunSpeed:F1} m/s");
+    }
+
+    void EndWallRun()
+    {
+        isWallRunning = false;
+        isWallRunningLeft = false;
+        isWallRunningRight = false;
+
+        // Keep momentum after wall run
+        if (currentSpeed > walkSpeed)
+        {
+            hasMomentum = true;
+            momentumSpeed = currentSpeed;
+            momentumDirection = wallRunDirection;
+        }
+
+        Debug.Log("Wall run ended");
     }
 
     void StartSlide(float horizontal, float vertical)
@@ -391,7 +581,7 @@ public class PlayerMovement : MonoBehaviour
         // Apply jump
         velocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
 
-        // Keep momentum with NO AIRR DECAY
+        // Keep momentum with NO DECAY
         hasMomentum = true;
         momentumSpeed = currentSpeedValue;
         momentumDirection = slideDirection;
@@ -456,6 +646,11 @@ public class PlayerMovement : MonoBehaviour
     public bool IsSliding()
     {
         return isSliding;
+    }
+
+    public bool IsWallRunning()
+    {
+        return isWallRunning;
     }
 
     public float GetCurrentVelocity()
