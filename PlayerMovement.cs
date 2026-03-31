@@ -4,20 +4,20 @@ public class PlayerMovement : MonoBehaviour
 {
     [Header("Movement Settings")]
     public float walkSpeed = 5f;
-    public float runSpeed = 8f;
-    public float acceleration = 10f; // Smooth acceleration
-    public float deceleration = 10f; // Smooth deceleration
+    public float runSpeed = 20f;
+    public float acceleration = 10f;
+    public float deceleration = 10f;
 
     [Header("Slide Settings")]
-    public float slideDuration = 1.25f;
-    public float slideCooldown = 0.5f;
-    public float slideBoost = 3f;
+    public float slideDuration = 1.5f;
+    public float slideCooldown = 0.3f;
+    public float slideBoost = 5f;
     public float slideTransitionSpeed = 10f;
 
     [Header("Camera Settings")]
     public Camera playerCamera;
     public float normalFOV = 60f;
-    public float slideFOV = 70f;
+    public float slideFOV = 75f;
     public float fovTransitionSpeed = 8f;
 
     [Header("Gravity")]
@@ -44,15 +44,19 @@ public class PlayerMovement : MonoBehaviour
     private float currentSlideHeight;
     private float currentCameraHeight;
 
+    // Momentum system
+    private bool hasMomentum;
+    private float momentumSpeed;
+    private Vector3 momentumDirection;
+    private bool wasJumpCancelled;
+
     void Start()
     {
         controller = GetComponent<CharacterController>();
 
-        // Store original capsule height and center
         originalHeight = controller.height;
         originalCenterY = controller.center.y;
 
-        // Find camera if not assigned
         if (playerCamera == null)
         {
             playerCamera = GetComponentInChildren<Camera>();
@@ -82,17 +86,34 @@ public class PlayerMovement : MonoBehaviour
             slideCooldownTimer -= Time.deltaTime;
         }
 
-        // Simple ground check
+        // Ground check
         bool isGrounded = controller.isGrounded;
 
         // Reset velocity when grounded
         if (isGrounded && velocity.y < 0)
         {
             velocity.y = -2f;
+
+            // Only clear momentum if we're going slow and didn't jump cancel
+            if (hasMomentum && !isSliding && !wasJumpCancelled)
+            {
+                if (momentumSpeed <= walkSpeed)
+                {
+                    hasMomentum = false;
+                    momentumSpeed = 0;
+                    Debug.Log("Momentum cleared on landing (slow)");
+                }
+                else
+                {
+                    Debug.Log($"Momentum preserved on landing: {momentumSpeed:F1} m/s");
+                }
+            }
+
+            wasJumpCancelled = false;
         }
 
         // Get input
-        float horizontal = Input.GetAxisRaw("Horizontal"); // Use Raw for more responsive input
+        float horizontal = Input.GetAxisRaw("Horizontal");
         float vertical = Input.GetAxisRaw("Vertical");
         bool hasMovementInput = (horizontal != 0 || vertical != 0);
 
@@ -112,10 +133,11 @@ public class PlayerMovement : MonoBehaviour
             EndSlide();
         }
 
-        // Handle jump to cancel slide
+        // Handle jump to cancel slide (preserve momentum)
         if (isSliding && jumpInput)
         {
-            CancelSlide();
+            CancelSlideWithMomentum();
+            wasJumpCancelled = true;
         }
 
         // Smooth transitions for slide state
@@ -123,7 +145,7 @@ public class PlayerMovement : MonoBehaviour
         {
             UpdateSlide();
 
-            // Smoothly transition height and camera position
+            // Smooth height transitions
             float targetHeight = originalHeight * 0.6f;
             float targetCameraHeight = originalCameraHeight * 0.6f;
 
@@ -144,7 +166,7 @@ public class PlayerMovement : MonoBehaviour
         }
         else
         {
-            // Smoothly transition back to normal
+            // Smooth transition back to normal
             currentSlideHeight = Mathf.Lerp(currentSlideHeight, originalHeight, Time.deltaTime * slideTransitionSpeed);
             currentCameraHeight = Mathf.Lerp(currentCameraHeight, originalCameraHeight, Time.deltaTime * slideTransitionSpeed);
 
@@ -160,13 +182,57 @@ public class PlayerMovement : MonoBehaviour
                 );
             }
 
-            // Normal movement with smoothing
-            if (hasMovementInput)
+            // Movement logic with momentum priority
+            if (hasMomentum && momentumSpeed > walkSpeed && !isSliding)
             {
+                // Use momentum for movement - NO DECAY IN AIR!
+                currentSpeed = momentumSpeed;
+
+                // ONLY decay momentum if on ground (friction)
+                if (isGrounded)
+                {
+                    momentumSpeed = Mathf.Max(momentumSpeed - (Time.deltaTime * 5f), walkSpeed);
+                    currentSpeed = momentumSpeed;
+                }
+                // In air: NO DECAY AT ALL - keep full speed
+
+                if (cameraTransform != null)
+                {
+                    // Allow slight steering while in momentum
+                    if (hasMovementInput)
+                    {
+                        Vector3 forward = cameraTransform.forward;
+                        Vector3 right = cameraTransform.right;
+                        forward.y = 0;
+                        right.y = 0;
+                        forward.Normalize();
+                        right.Normalize();
+
+                        Vector3 inputDir = (forward * vertical) + (right * horizontal);
+                        if (inputDir.magnitude > 0.1f)
+                        {
+                            momentumDirection = Vector3.Lerp(momentumDirection, inputDir.normalized, Time.deltaTime * 3f);
+                        }
+                    }
+
+                    controller.Move(momentumDirection * currentSpeed * Time.deltaTime);
+                    velocity.x = momentumDirection.x * currentSpeed;
+                    velocity.z = momentumDirection.z * currentSpeed;
+                }
+
+                // Stop momentum when speed drops below walk speed AND grounded
+                if (momentumSpeed <= walkSpeed && isGrounded)
+                {
+                    hasMomentum = false;
+                    Debug.Log("Momentum faded out on ground");
+                }
+            }
+            else if (hasMovementInput)
+            {
+                // Normal movement
                 isRunning = Input.GetKey(KeyCode.LeftShift) && hasMovementInput;
                 float targetSpeed = isRunning ? runSpeed : walkSpeed;
 
-                // Calculate target movement direction based on camera
                 if (cameraTransform != null)
                 {
                     Vector3 forward = cameraTransform.forward;
@@ -180,35 +246,27 @@ public class PlayerMovement : MonoBehaviour
                     targetMoveDirection = (forward * vertical) + (right * horizontal);
                     targetMoveDirection.Normalize();
 
-                    // Smoothly interpolate movement direction
                     moveDirection = Vector3.Lerp(moveDirection, targetMoveDirection, Time.deltaTime * acceleration);
-
-                    // Smoothly interpolate speed
                     currentSpeed = Mathf.Lerp(currentSpeed, targetSpeed, Time.deltaTime * acceleration);
 
-                    // Apply movement
                     controller.Move(moveDirection * currentSpeed * Time.deltaTime);
-
-                    // Update velocity for physics
                     velocity.x = moveDirection.x * currentSpeed;
                     velocity.z = moveDirection.z * currentSpeed;
                 }
             }
             else
             {
-                // No input - smoothly decelerate
+                // No input - decelerate
                 currentSpeed = Mathf.Lerp(currentSpeed, 0, Time.deltaTime * deceleration);
                 moveDirection = Vector3.Lerp(moveDirection, Vector3.zero, Time.deltaTime * deceleration);
 
                 controller.Move(moveDirection * currentSpeed * Time.deltaTime);
-
-                // Update velocity for physics
                 velocity.x = moveDirection.x * currentSpeed;
                 velocity.z = moveDirection.z * currentSpeed;
             }
         }
 
-        // Update camera FOV smoothly
+        // Update camera FOV
         if (playerCamera != null)
         {
             float targetFOV = isSliding ? slideFOV : normalFOV;
@@ -216,25 +274,37 @@ public class PlayerMovement : MonoBehaviour
             playerCamera.fieldOfView = currentFOV;
         }
 
-        // Jump
+        // Jump - preserve momentum
         if (jumpInput && isGrounded && !isSliding)
         {
             velocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
-            Debug.Log("Jumped!");
+
+            if (hasMomentum && momentumSpeed > walkSpeed)
+            {
+                Debug.Log($"Jumped with momentum: {momentumSpeed:F1} m/s - Speed will be preserved in air!");
+            }
         }
 
         // Apply gravity
         velocity.y += gravity * Time.deltaTime;
         controller.Move(velocity * Time.deltaTime);
+
+        // Debug momentum in air
+        if (Time.frameCount % 60 == 0 && hasMomentum && !isGrounded)
+        {
+            Debug.Log($"Momentum in air: {momentumSpeed:F1} m/s - NO DECAY!");
+        }
     }
 
     void StartSlide(float horizontal, float vertical)
     {
         isSliding = true;
         slideTimer = slideDuration;
+        wasJumpCancelled = false;
 
-        // Get current movement direction and speed
-        float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
+        // Get current speed (either from momentum or normal movement)
+        float currentHorizontalSpeed = hasMomentum && momentumSpeed > currentSpeed ?
+            momentumSpeed : new Vector3(velocity.x, 0, velocity.z).magnitude;
 
         if (cameraTransform != null)
         {
@@ -248,7 +318,6 @@ public class PlayerMovement : MonoBehaviour
 
             slideDirection = (forward * vertical) + (right * horizontal);
 
-            // If there's no input, slide forward
             if (slideDirection.magnitude < 0.1f)
             {
                 slideDirection = forward;
@@ -257,20 +326,23 @@ public class PlayerMovement : MonoBehaviour
             slideDirection.Normalize();
         }
 
-        // Calculate slide speed with boost
-        float initialSpeed = Mathf.Max(currentHorizontalSpeed, walkSpeed);
-        float slideStartSpeed = initialSpeed + slideBoost;
+        // Calculate slide speed: current speed + boost
+        float slideStartSpeed = currentHorizontalSpeed + slideBoost;
+
+        // Store as momentum
+        hasMomentum = true;
+        momentumSpeed = slideStartSpeed;
+        momentumDirection = slideDirection;
 
         // Apply slide velocity
         velocity = new Vector3(slideDirection.x, velocity.y, slideDirection.z) * slideStartSpeed;
-
-        // Store current speeds for smooth transition
-        currentSlideHeight = controller.height;
-        currentCameraHeight = cameraTransform != null ? cameraTransform.localPosition.y : originalCameraHeight;
         currentSpeed = slideStartSpeed;
         moveDirection = slideDirection;
 
-        Debug.Log($"Slide started! Speed: {slideStartSpeed}");
+        currentSlideHeight = controller.height;
+        currentCameraHeight = cameraTransform != null ? cameraTransform.localPosition.y : originalCameraHeight;
+
+        Debug.Log($"Slide started! Speed: {slideStartSpeed:F1} m/s (Boost: +{slideBoost})");
     }
 
     void UpdateSlide()
@@ -278,17 +350,29 @@ public class PlayerMovement : MonoBehaviour
         // Update slide timer
         slideTimer -= Time.deltaTime;
 
-        // Smooth deceleration curve (ease out)
+        // Keep speed high for longer, then gradually decrease
         float t = 1 - (slideTimer / slideDuration);
-        float smoothT = 1 - Mathf.Pow(1 - t, 2);
+        float currentSlideSpeed;
 
-        float currentSlideSpeed = Mathf.Lerp(walkSpeed + slideBoost, walkSpeed * 0.8f, smoothT);
+        if (t < 0.6f)
+        {
+            // First 60% of slide: maintain high speed
+            currentSlideSpeed = momentumSpeed;
+        }
+        else
+        {
+            // Last 40%: gradually slow down
+            float slowdownT = (t - 0.6f) / 0.4f;
+            currentSlideSpeed = Mathf.Lerp(momentumSpeed, walkSpeed * 1.2f, slowdownT);
+        }
+
         currentSpeed = currentSlideSpeed;
+        momentumSpeed = currentSlideSpeed;
 
         // Apply slide movement
         controller.Move(slideDirection * currentSlideSpeed * Time.deltaTime);
 
-        // Update velocity for physics
+        // Update velocity
         velocity.x = slideDirection.x * currentSlideSpeed;
         velocity.z = slideDirection.z * currentSlideSpeed;
 
@@ -299,19 +383,37 @@ public class PlayerMovement : MonoBehaviour
         }
     }
 
-    void CancelSlide()
+    void CancelSlideWithMomentum()
     {
-        // Jump cancel - preserve current speed
+        // Preserve current speed as momentum
         float currentSpeedValue = new Vector3(velocity.x, 0, velocity.z).magnitude;
 
         // Apply jump
         velocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
 
+        // Keep momentum with NO AIRR DECAY
+        hasMomentum = true;
+        momentumSpeed = currentSpeedValue;
+        momentumDirection = slideDirection;
+
         // End slide
         isSliding = false;
         slideCooldownTimer = slideCooldown;
 
-        Debug.Log($"Slide cancelled with jump! Speed: {currentSpeedValue}");
+        // Restore height
+        controller.height = originalHeight;
+        controller.center = new Vector3(0, originalCenterY, 0);
+
+        if (playerCamera != null)
+        {
+            cameraTransform.localPosition = new Vector3(
+                cameraTransform.localPosition.x,
+                originalCameraHeight,
+                cameraTransform.localPosition.z
+            );
+        }
+
+       // Debug.Log($"Slide cancelled with jump! Momentum preserved: {momentumSpeed:F1} m/s - Will NOT decay in air!"); - ADD FOR DEBUGGING
     }
 
     void EndSlide()
@@ -319,17 +421,31 @@ public class PlayerMovement : MonoBehaviour
         isSliding = false;
         slideCooldownTimer = slideCooldown;
 
-        // Get current slide speed
+        // Keep momentum when ending slide naturally
         float currentSlideSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
 
-        // Set velocity to a reasonable speed
-        float endSpeed = Mathf.Min(currentSlideSpeed, walkSpeed * 1.2f);
-        velocity.x = slideDirection.x * endSpeed;
-        velocity.z = slideDirection.z * endSpeed;
-        currentSpeed = endSpeed;
-        moveDirection = slideDirection;
+        if (currentSlideSpeed > walkSpeed)
+        {
+            hasMomentum = true;
+            momentumSpeed = currentSlideSpeed;
+            momentumDirection = slideDirection;
+            currentSpeed = currentSlideSpeed;
+            moveDirection = slideDirection;
+            Debug.Log($"Slide ended with momentum: {momentumSpeed:F1} m/s");
+        }
 
-        Debug.Log($"Slide ended!");
+        // Restore height
+        controller.height = originalHeight;
+        controller.center = new Vector3(0, originalCenterY, 0);
+
+        if (playerCamera != null)
+        {
+            cameraTransform.localPosition = new Vector3(
+                cameraTransform.localPosition.x,
+                originalCameraHeight,
+                cameraTransform.localPosition.z
+            );
+        }
     }
 
     public bool IsRunning()
@@ -342,7 +458,6 @@ public class PlayerMovement : MonoBehaviour
         return isSliding;
     }
 
-    // Velocity UI method -- UI to check velocity. remove if unwanted.
     public float GetCurrentVelocity()
     {
         return new Vector3(velocity.x, 0, velocity.z).magnitude;
