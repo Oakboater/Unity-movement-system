@@ -13,6 +13,8 @@ public class PlayerMovement : MonoBehaviour
     public float slideCooldown = 0.3f;
     public float slideBoost = 5f;
     public float slideTransitionSpeed = 10f;
+    public float maxSlideGainSpeed = 20f;
+    public float slideDecayRate = 0.5f;
 
     [Header("Wall Run Settings")]
     public bool enableWallRun = true;
@@ -28,16 +30,27 @@ public class PlayerMovement : MonoBehaviour
     public float minWallRunSpeed = 8f;
     public bool enableDebugLogs = false;
 
+    [Header("Horizontal Wall Run Angle Control")]
+    public float lookUpSpeedLoss = 3f; // Speed loss when looking up
+    public float lookUpVerticalGain = 5f; // Vertical gain when looking up
+    public float lookDownSpeedGain = 3f; // Speed gain when looking down
+    public float lookDownVerticalLoss = 5f; // Vertical loss when looking down
+    public float angleTransitionSpeed = 5f; // How fast angle affects movement
+
     [Header("Vertical Wall Run Settings")]
     public bool enableVerticalWallRun = true;
-    public float verticalWallRunSpeed = 12f;
-    public float verticalWallRunGravity = -5f;
+    public float verticalWallRunBaseSpeed = 12f;
+    public float verticalWallRunGravity = -12f; // Increased gravity
     public float verticalWallRunDuration = 2f;
-    public float verticalWallRunJumpForce = 15f;
+    public float verticalWallRunJumpForce = 18f; // Increased jump force
     public float verticalWallRunAngleThreshold = 45f;
     public float verticalWallRunForwardSpeed = 8f;
-    public float maxVerticalWallRunSpeed = 20f;
     public float verticalWallRunCooldown = 0.5f;
+    public float verticalWallRunMaxGainSpeed = 20f;
+    public float verticalWallRunSpeedBoostUp = 3f;
+    public float verticalWallRunSpeedBoostDown = 7f;
+    public float verticalWallRunDecayRate = 2f; // Speed decay when climbing
+    public float verticalMomentumTransfer = 0.5f; // Transfer speed to height on fall
 
     [Header("Camera Settings")]
     public Camera playerCamera;
@@ -68,6 +81,8 @@ public class PlayerMovement : MonoBehaviour
     private float currentFOV;
     private float currentSlideHeight;
     private float currentCameraHeight;
+    private int slideCount;
+    private float lastSlideTime;
 
     // Momentum system
     private bool hasMomentum;
@@ -86,6 +101,8 @@ public class PlayerMovement : MonoBehaviour
     private Vector3 wallRunDirection;
     private bool wallRunSide;
     private bool hasWallRunBoosted;
+    private float currentVerticalOffset; // For horizontal wall run height control
+    private float targetVerticalOffset;
 
     void Start()
     {
@@ -111,6 +128,7 @@ public class PlayerMovement : MonoBehaviour
         currentSlideHeight = originalHeight;
         moveDirection = Vector3.zero;
         targetMoveDirection = Vector3.zero;
+        slideCount = 0;
 
         if (enableDebugLogs) Debug.Log("PlayerMovement initialized");
     }
@@ -124,6 +142,12 @@ public class PlayerMovement : MonoBehaviour
 
         // Ground check
         bool isGrounded = controller.isGrounded;
+
+        // Reset slide count when grounded for a while
+        if (isGrounded && Time.time - lastSlideTime > 1f)
+        {
+            slideCount = 0;
+        }
 
         // Wall run check (only if not grounded, not sliding, and not on cooldown)
         if (enableWallRun && !isGrounded && !isSliding && !isWallRunning && wallRunCooldownTimer <= 0)
@@ -236,7 +260,6 @@ public class PlayerMovement : MonoBehaviour
 
                 if (isGrounded)
                 {
-                    // Apply deceleration only when grounded
                     momentumSpeed = Mathf.Max(momentumSpeed - (Time.deltaTime * deceleration * 2f), walkSpeed);
                     currentSpeed = momentumSpeed;
                 }
@@ -347,21 +370,18 @@ public class PlayerMovement : MonoBehaviour
         float cameraAngle = Vector3.Angle(cameraTransform.forward, Vector3.up);
         bool lookingUp = cameraAngle < verticalWallRunAngleThreshold;
 
-        // For vertical wall run, we need to check forward horizontally, not where the camera is pointing
+        // For vertical wall run, we need to check forward horizontally
         Vector3 horizontalForward = cameraTransform.forward;
         horizontalForward.y = 0;
         horizontalForward.Normalize();
 
-        // Check for walls in front (horizontal direction for vertical wall run)
         RaycastHit forwardHit;
         bool forwardWall = Physics.Raycast(transform.position, horizontalForward, out forwardHit, wallCheckDistance, wallLayer);
 
-        // Also check a bit higher up for vertical wall run
         Vector3 higherPosition = transform.position + Vector3.up * 0.5f;
         RaycastHit higherForwardHit;
         bool higherForwardWall = Physics.Raycast(higherPosition, horizontalForward, out higherForwardHit, wallCheckDistance, wallLayer);
 
-        // Check for walls on left and right (for horizontal wall runs)
         Vector3 leftDir = -cameraTransform.right;
         Vector3 rightDir = cameraTransform.right;
         leftDir.y = 0;
@@ -373,44 +393,25 @@ public class PlayerMovement : MonoBehaviour
         bool leftWall = Physics.Raycast(transform.position, leftDir, out leftHit, wallCheckDistance, wallLayer);
         bool rightWall = Physics.Raycast(transform.position, rightDir, out rightHit, wallCheckDistance, wallLayer);
 
-        // Also check for horizontal wall run with forward direction (horizontal)
         RaycastHit forwardHorizontalHit;
         bool forwardHorizontalWall = Physics.Raycast(transform.position, horizontalForward, out forwardHorizontalHit, wallCheckDistance, wallLayer);
 
-        // DEBUG: Log conditions for vertical wall run
         if (enableDebugLogs)
         {
-            Debug.Log($"Vertical Wall Run Check - LookingUp: {lookingUp} (Angle: {cameraAngle:F1}°), " +
-                      $"ForwardWall: {forwardWall} or {higherForwardWall}, " +
-                      $"VerticalInput: {vertical}, " +
-                      $"Enabled: {enableVerticalWallRun}, " +
-                      $"Speed: {currentHorizontalSpeed:F1}");
-
-            if (forwardWall)
-            {
-                Debug.Log($"Wall hit (normal height): {forwardHit.collider.gameObject.name}, Distance: {forwardHit.distance:F2}");
-            }
-            if (higherForwardWall)
-            {
-                Debug.Log($"Wall hit (higher): {higherForwardHit.collider.gameObject.name}, Distance: {higherForwardHit.distance:F2}");
-            }
-            Debug.DrawRay(transform.position, horizontalForward * wallCheckDistance, Color.red, 0.1f);
-            Debug.DrawRay(higherPosition, horizontalForward * wallCheckDistance, Color.yellow, 0.1f);
+            Debug.Log($"Wall Run Check - LookingUp: {lookingUp} (Angle: {cameraAngle:F1}°), " +
+                      $"ForwardWall: {forwardWall}, Speed: {currentHorizontalSpeed:F1}");
         }
 
-        // Try vertical wall run first if enabled and conditions are met
-        // Check at both normal and higher position
+        // Try vertical wall run first
         if (enableVerticalWallRun && lookingUp && vertical > 0 && (forwardWall || higherForwardWall))
         {
-            // Use the hit that actually hit something
             Vector3 hitNormal = forwardWall ? forwardHit.normal : higherForwardHit.normal;
             if (enableDebugLogs) Debug.Log("ACTIVATING VERTICAL WALL RUN!");
             StartVerticalWallRun(hitNormal);
             return;
         }
 
-        // Horizontal wall run (existing logic)
-        // Require minimum speed and forward input
+        // Horizontal wall run
         if (vertical <= 0 || currentHorizontalSpeed < 2f) return;
 
         if (leftWall && !rightWall)
@@ -427,84 +428,71 @@ public class PlayerMovement : MonoBehaviour
         }
     }
 
-   void StartVerticalWallRun(Vector3 normal)
-{
-    // Check if on cooldown
-    if (verticalWallRunCooldownTimer > 0)
+    void StartVerticalWallRun(Vector3 normal)
     {
-        if (enableDebugLogs) Debug.Log("Vertical Wall Run on cooldown!");
-        return;
-    }
-
-    // Check if we're trying to chain too quickly (prevents speed stacking)
-    float timeSinceLastVertical = Time.time - lastVerticalWallRunTime;
-    if (timeSinceLastVertical < 0.5f && lastVerticalWallRunTime > 0)
-    {
-        if (enableDebugLogs) Debug.Log("Too soon for another vertical wall run!");
-        return;
-    }
-
-    isWallRunning = true;
-    isVerticalWallRun = true;
-    wallNormal = normal;
-    wallRunTimer = verticalWallRunDuration;
-    hasWallRunBoosted = false;
-
-    // Calculate wall run direction (up and forward along the wall)
-    Vector3 wallUp = Vector3.ProjectOnPlane(Vector3.up, normal).normalized;
-    Vector3 wallForward = Vector3.ProjectOnPlane(cameraTransform.forward, normal).normalized;
-
-    // Combine upward and forward movement
-    wallRunDirection = (wallUp * verticalWallRunSpeed + wallForward * verticalWallRunForwardSpeed).normalized;
-
-    // Get current speed
-    float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
-    float currentVerticalSpeed = Mathf.Abs(velocity.y);
-    float totalSpeed = Mathf.Sqrt(currentHorizontalSpeed * currentHorizontalSpeed + currentVerticalSpeed * currentVerticalSpeed);
-
-    // Apply speed boost WITHOUT capping - preserve high speeds
-    if (!hasWallRunBoosted)
-    {
-        hasWallRunBoosted = true;
-
-        float targetSpeed;
-
-        if (totalSpeed < verticalWallRunSpeed)
+        if (verticalWallRunCooldownTimer > 0)
         {
-            // Too slow, set to base speed
-            targetSpeed = verticalWallRunSpeed;
+            if (enableDebugLogs) Debug.Log("Vertical Wall Run on cooldown!");
+            return;
+        }
+
+        float timeSinceLastVertical = Time.time - lastVerticalWallRunTime;
+        if (timeSinceLastVertical < 0.5f && lastVerticalWallRunTime > 0)
+        {
+            if (enableDebugLogs) Debug.Log("Too soon for another vertical wall run!");
+            return;
+        }
+
+        isWallRunning = true;
+        isVerticalWallRun = true;
+        wallNormal = normal;
+        wallRunTimer = verticalWallRunDuration;
+        hasWallRunBoosted = false;
+
+        Vector3 wallUp = Vector3.ProjectOnPlane(Vector3.up, normal).normalized;
+        Vector3 wallForward = Vector3.ProjectOnPlane(cameraTransform.forward, normal).normalized;
+        wallRunDirection = (wallUp * verticalWallRunBaseSpeed + wallForward * verticalWallRunForwardSpeed).normalized;
+
+        float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
+        float currentVerticalSpeed = Mathf.Abs(velocity.y);
+        float totalSpeed = Mathf.Sqrt(currentHorizontalSpeed * currentHorizontalSpeed + currentVerticalSpeed * currentVerticalSpeed);
+
+        if (!hasWallRunBoosted)
+        {
+            hasWallRunBoosted = true;
+
+            float targetSpeed;
+            if (totalSpeed < verticalWallRunBaseSpeed)
+            {
+                targetSpeed = verticalWallRunBaseSpeed;
+            }
+            else if (totalSpeed < verticalWallRunMaxGainSpeed)
+            {
+                targetSpeed = Mathf.Min(totalSpeed + verticalWallRunSpeedBoostDown, verticalWallRunMaxGainSpeed);
+            }
+            else
+            {
+                targetSpeed = totalSpeed;
+            }
+
+            currentSpeed = targetSpeed;
+
+            if (enableDebugLogs)
+            {
+                Debug.Log($"Vertical Wall Run Started! Speed: {totalSpeed:F1} -> {currentSpeed:F1} m/s");
+            }
         }
         else
         {
-            // Keep existing speed and add boost, but don't limit it
-            // This allows you to maintain high speeds (30+ m/s)
-            targetSpeed = totalSpeed + wallRunSpeedBoost;
+            currentSpeed = totalSpeed;
         }
 
-        currentSpeed = targetSpeed;
-
-        if (enableDebugLogs)
-        {
-            Debug.Log($"Vertical Wall Run Started! Speed: {totalSpeed:F1} -> {currentSpeed:F1} m/s (No cap)");
-        }
+        velocity = wallRunDirection * currentSpeed;
+        hasMomentum = true;
+        momentumSpeed = currentSpeed;
+        momentumDirection = wallRunDirection;
+        lastVerticalWallRunTime = Time.time;
     }
-    else
-    {
-        // Already boosted this wall run, just maintain speed
-        currentSpeed = totalSpeed;
-    }
-
-    // Apply velocity along wall
-    velocity = wallRunDirection * currentSpeed;
-
-    // Store momentum without cap
-    hasMomentum = true;
-    momentumSpeed = currentSpeed;
-    momentumDirection = wallRunDirection;
-
-    // Record time for cooldown
-    lastVerticalWallRunTime = Time.time;
-}
 
     void StartWallRun(Vector3 normal, bool isLeft)
     {
@@ -514,38 +502,30 @@ public class PlayerMovement : MonoBehaviour
         wallNormal = normal;
         wallRunTimer = wallRunDuration;
         hasWallRunBoosted = false;
+        currentVerticalOffset = 0;
+        targetVerticalOffset = 0;
 
-        // Calculate wall run direction (forward along the wall)
         Vector3 wallForward = Vector3.Cross(normal, Vector3.up);
-
-        // Determine direction based on camera facing
         float dot = Vector3.Dot(wallForward, cameraTransform.forward);
         if (dot < 0) wallForward = -wallForward;
-
         wallRunDirection = wallForward.normalized;
 
-        // Get current horizontal speed
         float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
 
-        // Apply speed boost without capping
         if (!hasWallRunBoosted)
         {
             hasWallRunBoosted = true;
 
-            // Calculate new speed - preserve high speeds, only boost if below max
             if (currentHorizontalSpeed < minWallRunSpeed)
             {
-                // Too slow, set to minimum
                 currentSpeed = minWallRunSpeed;
             }
             else if (currentHorizontalSpeed < wallRunSpeed)
             {
-                // Below max speed, add boost
                 currentSpeed = Mathf.Min(currentHorizontalSpeed + wallRunSpeedBoost, wallRunSpeed);
             }
             else
             {
-                // Already above max speed, preserve the high speed
                 currentSpeed = currentHorizontalSpeed;
             }
 
@@ -559,140 +539,203 @@ public class PlayerMovement : MonoBehaviour
             currentSpeed = currentHorizontalSpeed;
         }
 
-        // Apply velocity along wall
         velocity.x = wallRunDirection.x * currentSpeed;
         velocity.z = wallRunDirection.z * currentSpeed;
-
-        // Store momentum
         hasMomentum = true;
         momentumSpeed = currentSpeed;
         momentumDirection = wallRunDirection;
     }
 
-   void UpdateWallRun()
-{
-    // Update timer
-    wallRunTimer -= Time.deltaTime;
-
-    // REMOVED the speed cap - let the player keep their speed
-    // No more capping to maxVerticalWallRunSpeed
-
-    // Check if still next to wall
-    Vector3 checkDir;
-    if (isVerticalWallRun)
+    void UpdateWallRun()
     {
-        // For vertical wall run, check forward direction to maintain contact
-        checkDir = cameraTransform.forward;
-        checkDir.y = 0;
-        checkDir.Normalize();
+        wallRunTimer -= Time.deltaTime;
+
+        // Get camera angle for horizontal wall run vertical movement
+        float cameraAngle = Vector3.Angle(cameraTransform.forward, Vector3.up);
+        float angleNormalized = Mathf.Clamp01(cameraAngle / 90f);
+
+        if (!isVerticalWallRun)
+        {
+            // Horizontal wall run - angle controls vertical movement and speed
+            float verticalSpeedModifier = 1f;
+            float verticalMovement = 0f;
+
+            if (cameraAngle < 45f) // Looking up
+            {
+                float upFactor = 1f - (cameraAngle / 45f);
+                verticalMovement = lookUpVerticalGain * upFactor * Time.deltaTime;
+                verticalSpeedModifier = 1f - (lookUpSpeedLoss / 10f) * upFactor;
+                currentSpeed *= verticalSpeedModifier;
+
+                if (enableDebugLogs && upFactor > 0.1f)
+                {
+                    Debug.Log($"Looking up - Gaining height: {verticalMovement:F2}, Speed loss: {(1f - verticalSpeedModifier) * 100:F0}%");
+                }
+            }
+            else if (cameraAngle > 45f) // Looking down
+            {
+                float downFactor = (cameraAngle - 45f) / 45f;
+                verticalMovement = -lookDownVerticalLoss * downFactor * Time.deltaTime;
+                float speedGain = lookDownSpeedGain * downFactor * Time.deltaTime;
+                currentSpeed = Mathf.Min(currentSpeed + speedGain, wallRunSpeed);
+
+                if (enableDebugLogs && downFactor > 0.1f)
+                {
+                    Debug.Log($"Looking down - Losing height: {-verticalMovement:F2}, Speed gain: {speedGain:F2}");
+                }
+            }
+
+            // Apply vertical movement
+            Vector3 verticalMove = wallNormal * verticalMovement;
+            controller.Move(verticalMove);
+            velocity += verticalMove / Time.deltaTime;
+        }
+        else
+        {
+            // Vertical wall run - apply speed decay
+            float speedDecay = verticalWallRunDecayRate * Time.deltaTime;
+            currentSpeed = Mathf.Max(currentSpeed - speedDecay, verticalWallRunBaseSpeed * 0.5f);
+
+            if (enableDebugLogs)
+            {
+                Debug.Log($"Vertical wall run - Speed decay: {currentSpeed:F1} m/s");
+            }
+        }
+
+        // Check if still next to wall
+        Vector3 checkDir;
+        if (isVerticalWallRun)
+        {
+            checkDir = cameraTransform.forward;
+            checkDir.y = 0;
+            checkDir.Normalize();
+        }
+        else
+        {
+            checkDir = wallRunSide ? -cameraTransform.right : cameraTransform.right;
+        }
+
+        RaycastHit hit;
+        bool stillNextToWall = Physics.Raycast(transform.position, checkDir, out hit, wallCheckDistance + 0.2f, wallLayer);
+
+        if (isVerticalWallRun && !stillNextToWall)
+        {
+            Vector3 higherPos = transform.position + Vector3.up * 0.5f;
+            stillNextToWall = Physics.Raycast(higherPos, checkDir, out hit, wallCheckDistance + 0.2f, wallLayer);
+        }
+
+        if (isVerticalWallRun && (transform.position.y > 20f || transform.position.y < 2f))
+        {
+            stillNextToWall = false;
+        }
+
+        if (!stillNextToWall || wallRunTimer <= 0)
+        {
+            EndWallRun();
+            return;
+        }
+
+        // Update directions
+        if (isVerticalWallRun)
+        {
+            wallNormal = hit.normal;
+            Vector3 wallUp = Vector3.ProjectOnPlane(Vector3.up, wallNormal).normalized;
+            Vector3 wallForward = Vector3.ProjectOnPlane(cameraTransform.forward, wallNormal).normalized;
+            wallRunDirection = (wallUp * verticalWallRunBaseSpeed + wallForward * verticalWallRunForwardSpeed).normalized;
+        }
+
+        Vector3 moveAlongWall = wallRunDirection * currentSpeed;
+        controller.Move(moveAlongWall * Time.deltaTime);
+        velocity = moveAlongWall;
+
+        momentumSpeed = currentSpeed;
+        momentumDirection = moveAlongWall.normalized;
+
+        if (enableDebugLogs)
+        {
+            Debug.DrawRay(transform.position, wallRunDirection * 2f, isVerticalWallRun ? Color.green : Color.cyan);
+        }
     }
-    else
-    {
-        checkDir = wallRunSide ? -cameraTransform.right : cameraTransform.right;
-    }
-
-    RaycastHit hit;
-    bool stillNextToWall = Physics.Raycast(transform.position, checkDir, out hit, wallCheckDistance + 0.2f, wallLayer);
-
-    // For vertical wall run, also check at higher position
-    if (isVerticalWallRun && !stillNextToWall)
-    {
-        Vector3 higherPos = transform.position + Vector3.up * 0.5f;
-        stillNextToWall = Physics.Raycast(higherPos, checkDir, out hit, wallCheckDistance + 0.2f, wallLayer);
-    }
-
-    // Also check if we're too high/too low for vertical wall run
-    if (isVerticalWallRun && (transform.position.y > 20f || transform.position.y < 2f))
-    {
-        stillNextToWall = false;
-    }
-
-    if (!stillNextToWall || wallRunTimer <= 0)
-    {
-        EndWallRun();
-        return;
-    }
-
-    // Update wall normal for vertical wall run
-    if (isVerticalWallRun)
-    {
-        wallNormal = hit.normal;
-
-        // Recalculate direction to maintain upward momentum
-        Vector3 wallUp = Vector3.ProjectOnPlane(Vector3.up, wallNormal).normalized;
-        Vector3 wallForward = Vector3.ProjectOnPlane(cameraTransform.forward, wallNormal).normalized;
-        wallRunDirection = (wallUp * verticalWallRunSpeed + wallForward * verticalWallRunForwardSpeed).normalized;
-    }
-
-    // Maintain current speed during wall run
-    Vector3 moveAlongWall = wallRunDirection * currentSpeed;
-
-    // Apply movement
-    controller.Move(moveAlongWall * Time.deltaTime);
-
-    // Update velocity
-    velocity = moveAlongWall;
-
-    // Keep momentum without cap
-    momentumSpeed = currentSpeed;
-    momentumDirection = moveAlongWall.normalized;
-
-    if (enableDebugLogs)
-    {
-        Debug.DrawRay(transform.position, wallRunDirection * 2f, isVerticalWallRun ? Color.green : Color.cyan);
-    }
-}
 
     void WallRunJump()
-{
-    Vector3 jumpDirection;
-
-    if (isVerticalWallRun)
     {
-        // For vertical wall run, jump outward and upward
-        jumpDirection = (wallNormal + Vector3.up).normalized;
-        velocity = jumpDirection * verticalWallRunJumpForce;
+        Vector3 jumpDirection;
+        float jumpForce;
+        float momentumTransfer = 0f;
+
+        if (isVerticalWallRun)
+        {
+            // On jump: gain extra momentum
+            jumpDirection = (wallNormal + Vector3.up).normalized;
+            jumpForce = verticalWallRunJumpForce;
+
+            // Transfer current speed to jump height
+            momentumTransfer = currentSpeed * verticalMomentumTransfer;
+            jumpForce += momentumTransfer;
+
+            if (enableDebugLogs)
+            {
+                Debug.Log($"Vertical Wall Run Jump! Speed: {currentSpeed:F1} -> Jump force: {jumpForce:F1} (+{momentumTransfer:F1} from momentum)");
+            }
+        }
+        else
+        {
+            // On jump: normal jump
+            jumpDirection = wallNormal + Vector3.up;
+            jumpDirection.Normalize();
+            jumpForce = wallRunJumpForce;
+
+            if (enableDebugLogs)
+            {
+                Debug.Log($"Horizontal Wall Run Jump! Speed: {currentSpeed:F1} m/s");
+            }
+        }
+
+        velocity = jumpDirection * jumpForce;
+
+        hasMomentum = true;
+        momentumSpeed = currentSpeed;
+        momentumDirection = wallRunDirection;
+
+        EndWallRun();
+        wallRunCooldownTimer = wallRunCooldown;
     }
-    else
-    {
-        // For horizontal wall run, jump away from wall
-        jumpDirection = wallNormal + Vector3.up;
-        jumpDirection.Normalize();
-        velocity = jumpDirection * wallRunJumpForce;
-    }
 
-    // Preserve momentum for air movement WITHOUT cap
-    hasMomentum = true;
-    momentumSpeed = currentSpeed; // Keep the full speed, don't cap it
-    momentumDirection = wallRunDirection;
-
-    // End wall run
-    EndWallRun();
-    wallRunCooldownTimer = wallRunCooldown;
-
-    if (enableDebugLogs) Debug.Log($"Wall Run Jump! Speed: {momentumSpeed:F1} m/s ({(isVerticalWallRun ? "Vertical" : "Horizontal")})");
-}
     void EndWallRun()
-{
-    isWallRunning = false;
-
-    if (isVerticalWallRun)
     {
-        // Set cooldown for vertical wall runs
-        verticalWallRunCooldownTimer = verticalWallRunCooldown;
-        if (enableDebugLogs) Debug.Log($"Vertical Wall Run Ended - Speed preserved: {currentSpeed:F1} m/s, Cooldown: {verticalWallRunCooldown}s");
-    }
+        if (isWallRunning && !isVerticalWallRun && !Input.GetButtonDown("Jump"))
+        {
+            // If not jumping off, transfer some horizontal speed to vertical height
+            float verticalTransfer = currentSpeed * verticalMomentumTransfer * 0.3f;
+            velocity.y += verticalTransfer;
 
-    isVerticalWallRun = false;
-    hasWallRunBoosted = false;
-    if (enableDebugLogs) Debug.Log("Wall Run Ended");
-}
+            if (enableDebugLogs && verticalTransfer > 0.1f)
+            {
+                Debug.Log($"Wall Run ended - Transferred {verticalTransfer:F1} m/s to vertical height");
+            }
+        }
+
+        isWallRunning = false;
+
+        if (isVerticalWallRun)
+        {
+            verticalWallRunCooldownTimer = verticalWallRunCooldown;
+            if (enableDebugLogs) Debug.Log($"Vertical Wall Run Ended - Speed preserved: {currentSpeed:F1} m/s");
+        }
+
+        isVerticalWallRun = false;
+        hasWallRunBoosted = false;
+        if (enableDebugLogs) Debug.Log("Wall Run Ended");
+    }
 
     void StartSlide(float horizontal, float vertical)
     {
         isSliding = true;
         slideTimer = slideDuration;
         wasJumpCancelled = false;
+
+        slideCount++;
+        float slidePenalty = Mathf.Max(0, 1f - (slideCount - 1) * slideDecayRate);
 
         float currentHorizontalSpeed = hasMomentum && momentumSpeed > currentSpeed ?
             momentumSpeed : new Vector3(velocity.x, 0, velocity.z).magnitude;
@@ -717,7 +760,15 @@ public class PlayerMovement : MonoBehaviour
             slideDirection.Normalize();
         }
 
-        float slideStartSpeed = currentHorizontalSpeed + slideBoost;
+        float slideStartSpeed;
+        if (currentHorizontalSpeed < maxSlideGainSpeed)
+        {
+            slideStartSpeed = Mathf.Min(currentHorizontalSpeed + (slideBoost * slidePenalty), maxSlideGainSpeed);
+        }
+        else
+        {
+            slideStartSpeed = currentHorizontalSpeed;
+        }
 
         hasMomentum = true;
         momentumSpeed = slideStartSpeed;
@@ -730,7 +781,10 @@ public class PlayerMovement : MonoBehaviour
         currentSlideHeight = controller.height;
         currentCameraHeight = cameraTransform != null ? cameraTransform.localPosition.y : originalCameraHeight;
 
-        if (enableDebugLogs) Debug.Log($"Slide started! Speed: {slideStartSpeed:F1} m/s");
+        if (enableDebugLogs)
+        {
+            Debug.Log($"Slide #{slideCount} started! Speed: {currentHorizontalSpeed:F1} -> {slideStartSpeed:F1} m/s (Penalty: {(1f - slidePenalty) * 100:F0}%)");
+        }
     }
 
     void UpdateSlide()
@@ -773,6 +827,7 @@ public class PlayerMovement : MonoBehaviour
 
         isSliding = false;
         slideCooldownTimer = slideCooldown;
+        lastSlideTime = Time.time;
 
         controller.height = originalHeight;
         controller.center = new Vector3(0, originalCenterY, 0);
@@ -793,6 +848,7 @@ public class PlayerMovement : MonoBehaviour
     {
         isSliding = false;
         slideCooldownTimer = slideCooldown;
+        lastSlideTime = Time.time;
 
         float currentSlideSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
 
@@ -823,5 +879,4 @@ public class PlayerMovement : MonoBehaviour
     public bool IsWallRunning() => isWallRunning;
     public bool IsVerticalWallRunning() => isVerticalWallRun;
     public float GetCurrentVelocity() => new Vector3(velocity.x, 0, velocity.z).magnitude;
-    public float GetCurrentVerticalWallRunCooldown() => verticalWallRunCooldownTimer;
 }
