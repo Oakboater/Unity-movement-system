@@ -11,6 +11,20 @@ public class PlayerMovement : MonoBehaviour
     public float acceleration = 10f;
     public float deceleration = 10f;
     public float turnPenalty = 0.5f;
+    public float airborneGravityMultiplier = 1f;
+    public float terminalVelocity = 50f;
+
+    [Header("Slam Settings")]
+    public bool enableSlam = true;
+    public float slamSpeed = 200f;
+    public float slamCooldown = 1f;
+    public float doubleTapWindow = 0.3f;
+    public float minAirTimeForSlam = 0.4f;
+    private float lastSlamTime = -999f;
+    private float lastCtrlPressTime = -999f;
+    private bool ctrlWasReleased = true;
+    private float airTimeForSlam;
+    private bool slamDisabled;
 
     [Header("Slide Settings")]
     public float slideDuration = 1.2f;
@@ -18,35 +32,42 @@ public class PlayerMovement : MonoBehaviour
     public float slideBoost = 2f;
     public float slideTransitionSpeed = 10f;
     public float maxSlideGainSpeed = 18f;
-    public float slideDecayRate = 0.7f;          // each consecutive slide reduces boost by this factor
+    public float slideDecayRate = 0.7f;
+    public float slideSteeringFactor = 0.15f;
 
     [Header("Wall Run Settings")]
     public bool enableWallRun = true;
     public float wallRunMaxSpeed = 35f;
     public float wallRunBaseDuration = 2.5f;
     public float wallRunJumpForce = 10f;
-    public float wallRunDecayFactor = 0.97f;     // exponential duration decay
+    public float wallRunDecayFactor = 0.97f;
     public float wallRunCooldown = 0.4f;
     public float wallCooldownTime = 0.6f;
+    public float backwardWallRunSpeedMultiplier = 0.6f;
+    public float backwardWallRunDurationMultiplier = 1.5f;
+    public float backwardWallRunTimeAdd = 0.5f;
+    public float directionSwitchCooldown = 0.3f;
+    public float minSpeedForBackwardsWallRun = 15f;
+    public float wallRunStartJumpDelay = 0.25f;
     public LayerMask wallLayer;
     public float wallCheckDistance = 1.0f;
     public float wallRunFOV = 75f;
     public float wallRunBaseBoost = 2f;
     public float minWallRunSpeed = 6f;
-    public float wallRunHopForce = 5f;           // horizontal push when kicking off
-    public float wallRunHopUpward = 6f;           // upward boost on kickoff
+    public float wallRunHopForce = 5f;
+    public float wallRunHopUpward = 8f;
     public float wallRunHopSideways = 3f;
     public float wallRunHopDuration = 0.2f;
     public float wallRunCoyoteTime = 0.08f;
     public bool enableDebugLogs = false;
 
     [Header("Horizontal Wall Run Controls")]
-    public float lookUpVerticalGain = 15f;
-    public float lookDownVerticalLoss = 8f;
+    public float lookUpVerticalGain = 18f;
+    public float lookDownVerticalLoss = 6f;
     public float lookUpSpeedReduction = 1.2f;
     public float lookDownSpeedBonus = 1.5f;
     public AnimationCurve heightCurve = AnimationCurve.EaseInOut(0, 0, 1, 1);
-    public float maxUpwardSpeed = 5f;
+    public float maxUpwardSpeed = 8f;
     public float maxDownwardSpeed = -8f;
 
     [Header("Chaining & Decay")]
@@ -74,13 +95,15 @@ public class PlayerMovement : MonoBehaviour
     public float verticalWallJumpExtra = 2f;
 
     [Header("Slope Slide Settings")]
-    public float slopeBoostMultiplier = 1.5f;
-    public float maxSlopeSpeed = 25f;
+    public float slopeBoostMultiplier = 3f;
+    public float maxSlopeSpeed = 35f;
     public float minSlopeAngle = 5f;
-    public float slopeSlideGravity = 20f;
+    public float slopeSlideGravity = 30f;
     public float slopeSlideFriction = 0.95f;
-    public float slopeAttachForce = 2f;
+    public float slopeAttachForce = 8f;
     public float uphillSlowdown = 20f;
+    public float slopeStickForce = 15f;
+    public float uphillReverseThreshold = 1.5f;
 
     [Header("Camera Settings")]
     public Camera playerCamera;
@@ -90,6 +113,8 @@ public class PlayerMovement : MonoBehaviour
 
     [Header("Gravity")]
     public float gravity = -9.81f;
+    public AnimationCurve fallGravityCurve = AnimationCurve.Linear(0, 0.1f, 2, 1f);
+    public float maxFallSpeed = -50f;
 
     [Header("Jump Settings")]
     public float jumpHeight = 1.2f;
@@ -112,6 +137,10 @@ public class PlayerMovement : MonoBehaviour
     private Vector3 slideDirection;
     private int slideCount;
     private float lastSlideTime;
+    private bool wasSlidingOnSlope;
+    private Vector3 slideForwardDir;
+    private Vector3 slideRightDir;
+    private bool isUphillSliding;
 
     // Height/scale adjustments
     private float originalHeight;
@@ -147,6 +176,21 @@ public class PlayerMovement : MonoBehaviour
     private Vector3 lastWallRunDir;
     private int currentWallID;
     private float wallHopTimer;
+    private float wallRunStartTime;
+
+    // Backwards wallrun transition
+    private bool canBackwardsWallrun;
+    private float backwardsWallrunWindow = 0.5f;
+    private Vector3 previousWallNormal;
+    private Vector3 previousWallPosition;
+    private float previousWallRunEndTime;
+    private bool wasForwardWallrun;
+    private Collider previousWallCollider;      // stores collider of forward wallrun wall
+
+    // Vertical to horizontal chaining
+    private bool canHorizontalAfterVertical;
+    private float verticalToHorizontalWindow = 0.4f;
+    private float verticalEndTime;
 
     // Vertical motion during wall runs
     private float verticalVelocity;
@@ -155,9 +199,24 @@ public class PlayerMovement : MonoBehaviour
     private float targetUpwardVelocity;
     private float upwardBoostRampTimer;
 
+    // Direction switching
+    private float lastDirectionSwitchTime = -999f;
+
     // Wall usage tracking
     private HashSet<int> usedWalls = new HashSet<int>();
     private Dictionary<int, float> wallCooldowns = new Dictionary<int, float>();
+
+    // Debug throttling
+    private float lastDebugLogTime;
+    private float debugLogInterval = 0.1f;
+    private Dictionary<string, int> messageCounts = new Dictionary<string, int>();
+    private Dictionary<string, float> messageLastTime = new Dictionary<string, float>();
+    private const int maxMessageRepeats = 3;
+    private const float messageThrottleWindow = 1.0f;
+
+    // Air time tracking for gravity curve
+    private float airTime;
+    private bool wasGroundedLastFrame;
 
     void Start()
     {
@@ -176,44 +235,63 @@ public class PlayerMovement : MonoBehaviour
         moveDirection = Vector3.zero;
         targetMoveDirection = Vector3.zero;
         slideCount = 0;
-
-        if (enableDebugLogs) Debug.Log("PlayerMovement initialized");
+        wasGroundedLastFrame = controller.isGrounded;
     }
 
     void Update()
     {
+        float delta = Time.deltaTime;
+
         // Timers
-        if (slideCooldownTimer > 0) slideCooldownTimer -= Time.deltaTime;
-        if (wallRunCooldownTimer > 0) wallRunCooldownTimer -= Time.deltaTime;
-        if (verticalWallRunCooldownTimer > 0) verticalWallRunCooldownTimer -= Time.deltaTime;
-        if (wallHopTimer > 0) wallHopTimer -= Time.deltaTime;
-        if (speedRampTimer > 0) speedRampTimer -= Time.deltaTime;
-        if (upwardBoostRampTimer > 0) upwardBoostRampTimer -= Time.deltaTime;
-        if (currentChainTension > 0) currentChainTension = Mathf.Max(0, currentChainTension - Time.deltaTime * 0.8f);
+        if (slideCooldownTimer > 0) slideCooldownTimer -= delta;
+        if (wallRunCooldownTimer > 0) wallRunCooldownTimer -= delta;
+        if (verticalWallRunCooldownTimer > 0) verticalWallRunCooldownTimer -= delta;
+        if (wallHopTimer > 0) wallHopTimer -= delta;
+        if (speedRampTimer > 0) speedRampTimer -= delta;
+        if (upwardBoostRampTimer > 0) upwardBoostRampTimer -= delta;
+        if (currentChainTension > 0) currentChainTension = Mathf.Max(0, currentChainTension - delta * 0.8f);
 
         bool isGrounded = controller.isGrounded;
 
-        // End wall run on ground and reset used walls
+        if (isGrounded != wasGroundedLastFrame)
+        {
+            SmartLog(isGrounded ? "Landed on ground" : "Left ground");
+            wasGroundedLastFrame = isGrounded;
+        }
+
+        if (!isGrounded && !isWallRunning)
+        {
+            airTime += delta;
+            airTimeForSlam += delta;
+        }
+        else if (isGrounded)
+        {
+            airTime = 0f;
+            airTimeForSlam = 0f;
+        }
+
         if (isGrounded)
         {
             if (isWallRunning) EndWallRun();
             if (usedWalls.Count > 0)
             {
                 usedWalls.Clear();
-                if (enableDebugLogs) Debug.Log("Used walls cleared (touched ground).");
+                SmartLog("Used walls cleared (touched ground).");
             }
+            slamDisabled = false;
+            canBackwardsWallrun = false;
+            canHorizontalAfterVertical = false;
+            wasSlidingOnSlope = false;
+            previousWallCollider = null;
         }
 
-        // Reset slide count after being grounded
         if (isGrounded && Time.time - lastSlideTime > 1f) slideCount = 0;
 
-        // Wall run activation
         if (enableWallRun && !isGrounded && !isSliding && !isWallRunning && wallRunCooldownTimer <= 0)
             CheckForWallRun();
 
         if (isWallRunning) UpdateWallRun();
 
-        // Ground reset
         if (isGrounded && velocity.y < 0)
         {
             velocity.y = -2f;
@@ -225,27 +303,75 @@ public class PlayerMovement : MonoBehaviour
                     momentumSpeed = 0;
                     lastWallRunForwardDir = Vector3.zero;
                 }
-                else if (enableDebugLogs) Debug.Log($"Momentum preserved: {momentumSpeed:F1}");
+                else if (enableDebugLogs && Time.time - lastDebugLogTime >= debugLogInterval)
+                {
+                    SmartLog($"Momentum preserved: {momentumSpeed:F1}");
+                }
             }
             wasJumpCancelled = false;
             hasWallRunBoosted = false;
         }
 
-        // Input
         float horizontal = Input.GetAxisRaw("Horizontal");
         float vertical = Input.GetAxisRaw("Vertical");
         bool hasMovementInput = (horizontal != 0 || vertical != 0);
         bool slideInput = Input.GetKey(KeyCode.LeftControl);
         bool jumpInput = Input.GetButtonDown("Jump");
 
+        // Slam double-tap with release requirement
+        if (enableSlam && !isGrounded && !isWallRunning && !isSliding && !slamDisabled)
+        {
+            if (slideInput)
+            {
+                if (ctrlWasReleased && Time.time - lastCtrlPressTime <= doubleTapWindow && Time.time - lastSlamTime > slamCooldown)
+                {
+                    if (airTimeForSlam >= minAirTimeForSlam)
+                    {
+                        velocity.y = -slamSpeed;
+                        lastSlamTime = Time.time;
+                        slamDisabled = true;
+                        SmartLog($"SLAM! Speed: {slamSpeed} m/s down (airtime: {airTimeForSlam:F2}s)");
+                    }
+                    else
+                    {
+                        SmartLog($"Slam blocked - need more air time (current: {airTimeForSlam:F2}s)");
+                    }
+                    lastCtrlPressTime = Time.time;
+                    ctrlWasReleased = false;
+                }
+                else
+                {
+                    lastCtrlPressTime = Time.time;
+                    ctrlWasReleased = false;
+                }
+            }
+            else
+            {
+                ctrlWasReleased = true;
+            }
+        }
+        else
+        {
+            if (!slideInput) ctrlWasReleased = true;
+        }
+
         // Slide initiation
         if (!isSliding && slideInput && isGrounded && slideCooldownTimer <= 0)
         {
+            RaycastHit groundHit;
+            bool onSlope = false;
+            float slopeAngle = 0f;
+            if (Physics.Raycast(transform.position + Vector3.up * 0.1f, Vector3.down, out groundHit, 2f))
+            {
+                slopeAngle = Vector3.Angle(groundHit.normal, Vector3.up);
+                onSlope = slopeAngle > minSlopeAngle;
+            }
+
             if (lastWallRunForwardDir != Vector3.zero && Time.time - lastWallRunEndTime <= 0.5f)
             {
                 slideDirection = lastWallRunForwardDir;
                 lastWallRunForwardDir = Vector3.zero;
-                if (enableDebugLogs) Debug.Log($"Slide using stored wall direction");
+                SmartLog("Slide using stored wall direction");
             }
             else if (cameraTransform != null)
             {
@@ -257,53 +383,85 @@ public class PlayerMovement : MonoBehaviour
                 if (slideDirection.magnitude < 0.1f) slideDirection = forward;
                 slideDirection.Normalize();
             }
-            StartSlide(slideDirection);
+            StartSlide(slideDirection, onSlope, slopeAngle);
         }
 
-        if (isSliding && !slideInput) EndSlide();
-        if (isSliding && jumpInput)
+        if (isSliding)
         {
-            CancelSlideWithMomentum();
-            wasJumpCancelled = true;
+            if (!slideInput && !wasSlidingOnSlope)
+            {
+                EndSlide();
+            }
+            else if (jumpInput)
+            {
+                CancelSlideWithMomentum();
+                wasJumpCancelled = true;
+            }
         }
 
-        // Wall jumps (coyote and active)
+        // Backwards wallrun (S+Jump)
+        if (canBackwardsWallrun && !isWallRunning && !isGrounded && Time.time - previousWallRunEndTime <= backwardsWallrunWindow)
+        {
+            if (vertical < 0 && jumpInput)
+            {
+                SmartLog($"Attempting backwards wallrun (window: {Time.time - previousWallRunEndTime:F2}s)");
+                CheckForWallRun();
+            }
+        }
+
+        // Vertical to horizontal chaining
+        if (canHorizontalAfterVertical && !isWallRunning && !isGrounded && Time.time - verticalEndTime <= verticalToHorizontalWindow)
+        {
+            if (hasMovementInput && !isVerticalWallRun)
+            {
+                SmartLog("Attempting horizontal wallrun after vertical");
+                CheckForWallRun();
+            }
+        }
+
+        // Wall jumps
         if (jumpInput && !isWallRunning && !isGrounded && Time.time - lastWallRunEndTime <= wallRunCoyoteTime && lastWallRunEndTime > 0)
         {
-            if (enableDebugLogs) Debug.Log($"COYOTE WALL JUMP!");
+            SmartLog("COYOTE WALL JUMP!");
             CoyoteWallJump();
             lastWallRunEndTime = 0;
         }
         else if (isWallRunning && jumpInput && Time.time - lastWallRunJumpTime >= wallRunJumpCooldown)
         {
-            if (enableDebugLogs) Debug.Log("WALL RUN JUMP!");
-            lastWallRunJumpTime = Time.time;
-            WallRunJump();
+            if (Time.time - wallRunStartTime >= wallRunStartJumpDelay)
+            {
+                SmartLog("WALL RUN JUMP!");
+                lastWallRunJumpTime = Time.time;
+                WallRunJump();
+            }
+            else
+            {
+                SmartLog("Wall jump blocked - too early");
+            }
         }
 
         // Slide height transition
-        if (isSliding && isGrounded)
+        if (isSliding && (isGrounded || wasSlidingOnSlope))
         {
-            UpdateSlide();
+            UpdateSlide(horizontal, vertical);
             float targetHeight = originalHeight * 0.6f;
             float targetCameraHeight = originalCameraHeight * 0.6f;
-            currentSlideHeight = Mathf.Lerp(currentSlideHeight, targetHeight, Time.deltaTime * slideTransitionSpeed);
-            currentCameraHeight = Mathf.Lerp(currentCameraHeight, targetCameraHeight, Time.deltaTime * slideTransitionSpeed);
+            currentSlideHeight = Mathf.Lerp(currentSlideHeight, targetHeight, delta * slideTransitionSpeed);
+            currentCameraHeight = Mathf.Lerp(currentCameraHeight, targetCameraHeight, delta * slideTransitionSpeed);
             controller.height = currentSlideHeight;
             controller.center = new Vector3(0, currentSlideHeight * 0.5f, 0);
             cameraTransform.localPosition = new Vector3(cameraTransform.localPosition.x, currentCameraHeight, cameraTransform.localPosition.z);
         }
         else
         {
-            if (isSliding) EndSlide();
-            currentSlideHeight = Mathf.Lerp(currentSlideHeight, originalHeight, Time.deltaTime * slideTransitionSpeed);
-            currentCameraHeight = Mathf.Lerp(currentCameraHeight, originalCameraHeight, Time.deltaTime * slideTransitionSpeed);
+            if (isSliding && !isGrounded && !wasSlidingOnSlope)
+                EndSlide();
+            currentSlideHeight = Mathf.Lerp(currentSlideHeight, originalHeight, delta * slideTransitionSpeed);
+            currentCameraHeight = Mathf.Lerp(currentCameraHeight, originalCameraHeight, delta * slideTransitionSpeed);
             controller.height = currentSlideHeight;
             controller.center = new Vector3(0, currentSlideHeight * 0.5f, 0);
             cameraTransform.localPosition = new Vector3(cameraTransform.localPosition.x, currentCameraHeight, cameraTransform.localPosition.z);
         }
-
-        // AIR CONTROL REMOVED – no steering while airborne (skill based)
 
         // Ground movement
         if (!isWallRunning)
@@ -311,7 +469,7 @@ public class PlayerMovement : MonoBehaviour
             if (hasMomentum && momentumSpeed > walkSpeed && !isSliding)
             {
                 currentSpeed = momentumSpeed;
-                if (isGrounded) momentumSpeed = Mathf.Max(momentumSpeed - (Time.deltaTime * deceleration * 2.5f), walkSpeed);
+                if (isGrounded) momentumSpeed = Mathf.Max(momentumSpeed - (delta * deceleration * 2.5f), walkSpeed);
                 currentSpeed = momentumSpeed;
 
                 if (hasMovementInput)
@@ -322,9 +480,9 @@ public class PlayerMovement : MonoBehaviour
                     forward.Normalize(); right.Normalize();
                     Vector3 inputDir = (forward * vertical) + (right * horizontal);
                     if (inputDir.magnitude > 0.1f)
-                        momentumDirection = Vector3.Lerp(momentumDirection, inputDir.normalized, Time.deltaTime * 6f);
+                        momentumDirection = Vector3.Lerp(momentumDirection, inputDir.normalized, delta * 6f);
                 }
-                controller.Move(momentumDirection * currentSpeed * Time.deltaTime);
+                controller.Move(momentumDirection * currentSpeed * delta);
                 velocity.x = momentumDirection.x * currentSpeed;
                 velocity.z = momentumDirection.z * currentSpeed;
 
@@ -342,17 +500,17 @@ public class PlayerMovement : MonoBehaviour
                 targetMoveDirection = (forward * vertical) + (right * horizontal);
                 targetMoveDirection.Normalize();
 
-                moveDirection = Vector3.Lerp(moveDirection, targetMoveDirection, Time.deltaTime * acceleration);
-                currentSpeed = Mathf.Lerp(currentSpeed, targetSpeed, Time.deltaTime * acceleration);
-                controller.Move(moveDirection * currentSpeed * Time.deltaTime);
+                moveDirection = Vector3.Lerp(moveDirection, targetMoveDirection, delta * acceleration);
+                currentSpeed = Mathf.Lerp(currentSpeed, targetSpeed, delta * acceleration);
+                controller.Move(moveDirection * currentSpeed * delta);
                 velocity.x = moveDirection.x * currentSpeed;
                 velocity.z = moveDirection.z * currentSpeed;
             }
             else
             {
-                currentSpeed = Mathf.Lerp(currentSpeed, 0, Time.deltaTime * deceleration);
-                moveDirection = Vector3.Lerp(moveDirection, Vector3.zero, Time.deltaTime * deceleration);
-                controller.Move(moveDirection * currentSpeed * Time.deltaTime);
+                currentSpeed = Mathf.Lerp(currentSpeed, 0, delta * deceleration);
+                moveDirection = Vector3.Lerp(moveDirection, Vector3.zero, delta * deceleration);
+                controller.Move(moveDirection * currentSpeed * delta);
                 velocity.x = moveDirection.x * currentSpeed;
                 velocity.z = moveDirection.z * currentSpeed;
             }
@@ -362,54 +520,69 @@ public class PlayerMovement : MonoBehaviour
         float targetFOV = normalFOV;
         if (isSliding) targetFOV = slideFOV;
         if (isWallRunning) targetFOV = wallRunFOV;
-        currentFOV = Mathf.Lerp(currentFOV, targetFOV, Time.deltaTime * fovTransitionSpeed);
+        currentFOV = Mathf.Lerp(currentFOV, targetFOV, delta * fovTransitionSpeed);
         playerCamera.fieldOfView = currentFOV;
 
-        // Regular jump
+        // Jump
         if (jumpInput && isGrounded && !isSliding && !isWallRunning)
         {
             velocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
-            if (hasMomentum && momentumSpeed > walkSpeed && enableDebugLogs) Debug.Log($"Jump with momentum: {momentumSpeed:F1}");
+            if (hasMomentum && momentumSpeed > walkSpeed)
+                SmartLog($"Jump with momentum: {momentumSpeed:F1}");
         }
 
-        // Gravity (applied only when not wall running)
+        // Gravity
         if (!isWallRunning)
-            velocity.y += gravity * Time.deltaTime;
+        {
+            if (!isGrounded)
+            {
+                float curveValue = fallGravityCurve.Evaluate(Mathf.Min(airTime, 2f));
+                float currentGravity = gravity * curveValue * airborneGravityMultiplier;
+                velocity.y += currentGravity * delta;
+                velocity.y = Mathf.Max(velocity.y, maxFallSpeed);
+            }
+            else
+            {
+                velocity.y += gravity * delta;
+            }
+        }
 
-        controller.Move(velocity * Time.deltaTime);
+        controller.Move(velocity * delta);
     }
 
     void CheckForWallRun()
     {
         float vertical = Input.GetAxisRaw("Vertical");
-        if (vertical <= 0) return;
+        if (vertical == 0 && !canBackwardsWallrun && !canHorizontalAfterVertical) return;
 
         float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
         float cameraAngle = Vector3.Angle(cameraTransform.forward, Vector3.up);
         bool lookingUp = cameraAngle < verticalWallRunAngleThreshold;
 
+        Collider[] nearbyWalls = Physics.OverlapSphere(transform.position, wallCheckDistance, wallLayer);
+        if (nearbyWalls.Length == 0) return;
+
         Vector3 horizontalForward = cameraTransform.forward;
         horizontalForward.y = 0;
         horizontalForward.Normalize();
 
-        RaycastHit forwardHit, higherHit, lowerHit, leftHit, rightHit;
-        bool forwardWall = Physics.SphereCast(transform.position, 0.3f, horizontalForward, out forwardHit, wallCheckDistance, wallLayer);
-        bool higherWall = Physics.SphereCast(transform.position + Vector3.up * 0.5f, 0.3f, horizontalForward, out higherHit, wallCheckDistance, wallLayer);
-        bool lowerWall = Physics.SphereCast(transform.position - Vector3.up * 0.3f, 0.3f, horizontalForward, out lowerHit, wallCheckDistance, wallLayer);
+        bool forwardWall = Physics.SphereCast(transform.position, 0.3f, horizontalForward, out RaycastHit forwardHit, wallCheckDistance, wallLayer);
+        bool higherWall = Physics.SphereCast(transform.position + Vector3.up * 0.5f, 0.3f, horizontalForward, out RaycastHit higherHit, wallCheckDistance, wallLayer);
+        bool lowerWall = Physics.SphereCast(transform.position - Vector3.up * 0.3f, 0.3f, horizontalForward, out RaycastHit lowerHit, wallCheckDistance, wallLayer);
 
         Vector3 leftDir = -cameraTransform.right; leftDir.y = 0; leftDir.Normalize();
         Vector3 rightDir = cameraTransform.right; rightDir.y = 0; rightDir.Normalize();
-        bool leftWall = Physics.SphereCast(transform.position, 0.3f, leftDir, out leftHit, wallCheckDistance, wallLayer);
-        bool rightWall = Physics.SphereCast(transform.position, 0.3f, rightDir, out rightHit, wallCheckDistance, wallLayer);
+        bool leftWall = Physics.SphereCast(transform.position, 0.3f, leftDir, out RaycastHit leftHit, wallCheckDistance, wallLayer);
+        bool rightWall = Physics.SphereCast(transform.position, 0.3f, rightDir, out RaycastHit rightHit, wallCheckDistance, wallLayer);
 
-        if (enableDebugLogs && (forwardWall || higherWall || lowerWall || leftWall || rightWall))
+        if (enableDebugLogs)
         {
-            if (forwardWall) Debug.Log($"Forward wall at {forwardHit.distance:F2}m, ID: {forwardHit.collider.GetInstanceID()}");
-            if (leftWall) Debug.Log($"Left wall at {leftHit.distance:F2}m");
-            if (rightWall) Debug.Log($"Right wall at {rightHit.distance:F2}m");
+            if (forwardWall) SmartLog($"Forward wall at {forwardHit.distance:F2}m, ID: {forwardHit.collider.GetInstanceID()}");
+            if (leftWall) SmartLog($"Left wall at {leftHit.distance:F2}m, ID: {leftHit.collider.GetInstanceID()}");
+            if (rightWall) SmartLog($"Right wall at {rightHit.distance:F2}m, ID: {rightHit.collider.GetInstanceID()}");
         }
 
-        // Vertical wall run (looking up)
+        // Vertical wall run
         if (enableVerticalWallRun && lookingUp && (forwardWall || higherWall || lowerWall))
         {
             RaycastHit hit = forwardWall ? forwardHit : (higherWall ? higherHit : lowerHit);
@@ -424,9 +597,99 @@ public class PlayerMovement : MonoBehaviour
             return;
         }
 
-        // Horizontal wall run
-        if (currentHorizontalSpeed < 3f) return;
+        if (currentHorizontalSpeed < 3f)
+        {
+            SmartLog($"Wallrun blocked - speed too low ({currentHorizontalSpeed:F1})");
+            return;
+        }
 
+        // Horizontal wallrun after vertical (weaker)
+        if (canHorizontalAfterVertical)
+        {
+            if (leftWall || rightWall || forwardWall)
+            {
+                RaycastHit hit = leftWall ? leftHit : (rightWall ? rightHit : forwardHit);
+                int wallID = hit.collider.GetInstanceID();
+                if (!usedWalls.Contains(wallID) && IsWallOffCooldown(wallID))
+                {
+                    SmartLog("Starting horizontal wallrun after vertical (weaker)");
+                    StartWallRun(hit.normal, leftWall, wallID, false, true);
+                    canHorizontalAfterVertical = false;
+                    return;
+                }
+            }
+        }
+
+        // BACKWARDS WALLRUN DETECTION (IMPROVED)
+        if (canBackwardsWallrun && vertical < 0)
+        {
+            // First, check if we are still near the same wall we ran forward on
+            if (previousWallCollider != null)
+            {
+                Vector3 closestPoint = previousWallCollider.ClosestPoint(transform.position);
+                float distanceToWall = Vector3.Distance(transform.position, closestPoint);
+
+                if (distanceToWall <= wallCheckDistance + 0.5f)
+                {
+                    Vector3 wallNormal = (transform.position - closestPoint).normalized;
+                    int wallID = previousWallCollider.GetInstanceID();
+
+                    if (!usedWalls.Contains(wallID) && IsWallOffCooldown(wallID))
+                    {
+                        SmartLog($"Starting backwards wallrun on same wall (distance: {distanceToWall:F2}m)");
+                        StartWallRun(wallNormal, false, wallID, true);
+                        canBackwardsWallrun = false;
+                        return;
+                    }
+                }
+            }
+
+            // Fallback: sphere cast behind player
+            Vector3 backDir = -cameraTransform.forward;
+            backDir.y = 0;
+            backDir.Normalize();
+
+            if (Physics.SphereCast(transform.position, 0.5f, backDir, out RaycastHit backHit, wallCheckDistance + 0.5f, wallLayer))
+            {
+                int wallID = backHit.collider.GetInstanceID();
+                if (!usedWalls.Contains(wallID) && IsWallOffCooldown(wallID))
+                {
+                    SmartLog($"Starting backwards wallrun via camera behind - Wall ID: {wallID}");
+                    StartWallRun(backHit.normal, false, wallID, true);
+                    canBackwardsWallrun = false;
+                    return;
+                }
+            }
+
+            // Last resort: check any nearby wall that's behind relative to velocity
+            Vector3 velocityDir = velocity.normalized;
+            foreach (var col in nearbyWalls)
+            {
+                Vector3 dirToWall = (col.ClosestPoint(transform.position) - transform.position).normalized;
+                if (Vector3.Dot(dirToWall, velocityDir) < -0.5f)
+                {
+                    int wallID = col.GetInstanceID();
+                    if (!usedWalls.Contains(wallID) && IsWallOffCooldown(wallID))
+                    {
+                        SmartLog($"Starting backwards wallrun via velocity behind - Wall ID: {wallID}");
+                        StartWallRun((transform.position - col.ClosestPoint(transform.position)).normalized, false, wallID, true);
+                        canBackwardsWallrun = false;
+                        return;
+                    }
+                }
+            }
+
+            SmartLog("Backwards wallrun failed - no suitable wall behind");
+        }
+
+        bool isBackwardsAttempt = vertical < 0;
+        if (isBackwardsAttempt && !canBackwardsWallrun)
+        {
+            SmartLog("Backwards wall run requires prior forward wallrun");
+            return;
+        }
+
+        // Regular horizontal wallrun
         if (leftWall && !rightWall)
         {
             int wallID = leftHit.collider.GetInstanceID();
@@ -453,7 +716,7 @@ public class PlayerMovement : MonoBehaviour
         {
             if (Time.time < nextAvailable)
             {
-                if (enableDebugLogs) Debug.Log($"Wall {wallID} on cooldown for {nextAvailable - Time.time:F2}s");
+                SmartLog($"Wall {wallID} on cooldown for {nextAvailable - Time.time:F2}s");
                 return false;
             }
             else
@@ -480,12 +743,14 @@ public class PlayerMovement : MonoBehaviour
         wallNormal = normal;
         wallRunTimer = verticalWallRunDuration;
         hasWallRunBoosted = false;
+        wallRunStartTime = Time.time;
+        canBackwardsWallrun = false;
+        wasForwardWallrun = false;
+        previousWallCollider = null;
 
         float multiplier = lookingAlongWall ? downwardRunMultiplier : 1f;
         float runBaseSpeed = verticalWallRunBaseSpeed * multiplier;
         float runForwardSpeed = verticalWallRunForwardSpeed * multiplier;
-        float runBoostUp = verticalWallRunSpeedBoostUp * multiplier;
-        float runBoostDown = verticalWallRunSpeedBoostDown * multiplier;
 
         wallUpDirection = Vector3.ProjectOnPlane(Vector3.up, normal).normalized;
         Vector3 wallForward = Vector3.ProjectOnPlane(cameraTransform.forward, normal).normalized;
@@ -500,10 +765,10 @@ public class PlayerMovement : MonoBehaviour
             else if (totalSpeed < runBaseSpeed)
                 targetSpeed = runBaseSpeed;
             else
-                targetSpeed = Mathf.Min(totalSpeed + runBoostDown, verticalWallRunMaxGainSpeed);
+                targetSpeed = Mathf.Min(totalSpeed + verticalWallRunSpeedBoostDown, verticalWallRunMaxGainSpeed);
 
             currentSpeed = targetSpeed;
-            if (enableDebugLogs) Debug.Log($"VERTICAL WALL RUN - Speed: {totalSpeed:F1} → {currentSpeed:F1} ({(lookingAlongWall ? "downward" : "upward")})");
+            SmartLog($"VERTICAL WALL RUN - Wall ID: {wallID}, Speed: {totalSpeed:F1} → {currentSpeed:F1} ({(lookingAlongWall ? "downward" : "upward")})");
         }
         else currentSpeed = totalSpeed;
 
@@ -517,7 +782,7 @@ public class PlayerMovement : MonoBehaviour
         currentChainTension = Mathf.Max(0, currentChainTension - verticalResetChain);
     }
 
-    void StartWallRun(Vector3 normal, bool isLeft, int wallID)
+    void StartWallRun(Vector3 normal, bool isLeft, int wallID, bool forceBackwards = false, bool afterVertical = false)
     {
         usedWalls.Add(wallID);
         wallCooldowns[wallID] = Time.time + wallCooldownTime;
@@ -526,18 +791,45 @@ public class PlayerMovement : MonoBehaviour
         isVerticalWallRun = false;
         wallRunSide = isLeft;
         wallNormal = normal;
-        wallRunTimer = wallRunBaseDuration;
         hasWallRunBoosted = false;
+        wallRunStartTime = Time.time;
 
         Vector3 wallForward = Vector3.Cross(normal, Vector3.up);
         if (Vector3.Dot(wallForward, cameraTransform.forward) < 0) wallForward = -wallForward;
         wallRunDirection = wallForward.normalized;
+
+        bool isBackwards = forceBackwards || Input.GetAxisRaw("Vertical") < 0;
+        if (!isBackwards)
+        {
+            canBackwardsWallrun = true;
+            previousWallNormal = normal;
+            previousWallPosition = GetClosestPointOnWall();
+            previousWallRunEndTime = Time.time;
+            wasForwardWallrun = true;
+
+            // Store collider for backwards detection
+            Collider[] cols = Physics.OverlapSphere(previousWallPosition, 0.5f, wallLayer);
+            if (cols.Length > 0) previousWallCollider = cols[0];
+
+            SmartLog($"Forward wallrun started - can backwards within {backwardsWallrunWindow}s");
+        }
+        else
+        {
+            canBackwardsWallrun = false;
+            wallRunDirection = -wallRunDirection;
+            wasForwardWallrun = false;
+            previousWallCollider = null;
+            SmartLog($"Backwards wallrun started - direction: {wallRunDirection}");
+        }
+
         lastWallRunForwardDir = wallRunDirection;
 
         float currentHorizontalSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
-
         float chainPenalty = 1f + currentChainTension;
         wallRunCooldownTimer = wallRunCooldown * chainPenalty;
+
+        float speedMultiplier = afterVertical ? 0.7f : 1f;
+        float durationMultiplier = afterVertical ? 0.7f : 1f;
 
         float cameraAngle = Vector3.Angle(cameraTransform.forward, Vector3.up);
         float speedModifier = 0f;
@@ -552,8 +844,20 @@ public class PlayerMovement : MonoBehaviour
             speedModifier = lookDownSpeedBonus * downFactor;
         }
         float totalBoost = Mathf.Clamp(wallRunBaseBoost + speedModifier, 1f, 3f);
-        targetWallRunSpeed = Mathf.Min(currentHorizontalSpeed + totalBoost, wallRunMaxSpeed);
+        targetWallRunSpeed = Mathf.Min(currentHorizontalSpeed + totalBoost, wallRunMaxSpeed) * speedMultiplier;
         targetWallRunSpeed = Mathf.Max(targetWallRunSpeed, minWallRunSpeed);
+
+        if (isBackwards)
+        {
+            targetWallRunSpeed *= backwardWallRunSpeedMultiplier;
+            wallRunTimer = wallRunBaseDuration * backwardWallRunDurationMultiplier * durationMultiplier;
+            targetWallRunSpeed = Mathf.Min(targetWallRunSpeed + 2f, wallRunMaxSpeed);
+            SmartLog($"Backwards wall run - speed: {targetWallRunSpeed:F1}, duration: {wallRunTimer:F1}s");
+        }
+        else
+        {
+            wallRunTimer = wallRunBaseDuration * durationMultiplier;
+        }
 
         speedRampTimer = 0.2f;
 
@@ -562,8 +866,8 @@ public class PlayerMovement : MonoBehaviour
         targetUpwardVelocity = wallRunHopUpward * upBoostFactor;
         upwardBoostRampTimer = 0.15f;
 
-        // Small horizontal nudge only
-        Vector3 kick = (wallRunDirection * wallRunHopForce * 0.3f) + (wallNormal * wallRunHopSideways * 0.3f);
+        float speedScaledHop = Mathf.Lerp(wallRunHopForce * 0.3f, wallRunHopForce * 0.8f, currentHorizontalSpeed / wallRunMaxSpeed);
+        Vector3 kick = (wallRunDirection * speedScaledHop) + (wallNormal * wallRunHopSideways * 0.3f);
         velocity += kick;
 
         wallHopTimer = wallRunHopDuration;
@@ -574,7 +878,12 @@ public class PlayerMovement : MonoBehaviour
 
         currentChainTension += chainPenaltyIncrease;
 
-        if (enableDebugLogs) Debug.Log($"HORIZONTAL WALL RUN - Upward boost: {targetUpwardVelocity:F1} (factor {upBoostFactor:F2})");
+        SmartLog($"HORIZONTAL WALL RUN - Wall ID: {wallID}, Upward boost: {targetUpwardVelocity:F1} (factor {upBoostFactor:F2})");
+    }
+
+    void StartWallRun(Vector3 normal, bool isLeft, int wallID)
+    {
+        StartWallRun(normal, isLeft, wallID, false, false);
     }
 
     void UpdateWallRun()
@@ -593,10 +902,49 @@ public class PlayerMovement : MonoBehaviour
             currentSpeed = targetWallRunSpeed;
         }
 
-        // Force kickoff when forward key is released
-        if (Input.GetAxisRaw("Vertical") <= 0 || wallRunTimer <= 0.05f)
+        if (!isVerticalWallRun)
         {
-            // 45-degree forced launch away from wall
+            float verticalInput = Input.GetAxisRaw("Vertical");
+            bool wantsBackwards = verticalInput < 0;
+            bool wantsForward = verticalInput > 0;
+            bool isCurrentlyBackwards = Vector3.Dot(wallRunDirection, lastWallRunForwardDir) < 0;
+
+            if (Time.time - lastDirectionSwitchTime > directionSwitchCooldown)
+            {
+                if ((isCurrentlyBackwards && wantsForward) || (!isCurrentlyBackwards && wantsBackwards))
+                {
+                    wallRunDirection = -wallRunDirection;
+                    lastWallRunForwardDir = wallRunDirection;
+                    lastDirectionSwitchTime = Time.time;
+
+                    float oldSpeed = currentSpeed;
+                    float newSpeed = wantsBackwards ? oldSpeed * backwardWallRunSpeedMultiplier : oldSpeed / backwardWallRunSpeedMultiplier;
+                    newSpeed = Mathf.Clamp(newSpeed, minWallRunSpeed, wallRunMaxSpeed);
+                    targetWallRunSpeed = newSpeed;
+                    speedRampTimer = 0.2f;
+
+                    if (wantsBackwards) wallRunTimer += backwardWallRunTimeAdd;
+                    SmartLog($"DIRECTION SWITCH - new speed target: {newSpeed:F1}, timer +{backwardWallRunTimeAdd}s");
+                }
+            }
+
+            if (verticalInput == 0)
+            {
+                ForceWallKickoff();
+                return;
+            }
+        }
+        else
+        {
+            if (Input.GetAxisRaw("Vertical") <= 0)
+            {
+                ForceWallKickoff();
+                return;
+            }
+        }
+
+        if (wallRunTimer <= 0.05f)
+        {
             ForceWallKickoff();
             return;
         }
@@ -687,7 +1035,7 @@ public class PlayerMovement : MonoBehaviour
                 wallClingTimer -= delta;
                 if (wallClingTimer <= 0f)
                 {
-                    if (enableDebugLogs) Debug.Log("Wall run ended - lost wall contact");
+                    SmartLog("Wall run ended - lost wall contact");
                     ForceWallKickoff();
                     return;
                 }
@@ -715,21 +1063,21 @@ public class PlayerMovement : MonoBehaviour
         momentumDirection = move.normalized;
     }
 
-    // Forces a 45-degree launch away from the wall (Titanfall 2 style)
-        void ForceWallKickoff()
+    void ForceWallKickoff()
     {
         if (!isWallRunning) return;
 
-        // Get the closest point on the wall
         Vector3 contactPoint = GetClosestPointOnWall();
-        // Direction away from the wall (from wall to player)
         Vector3 away = (transform.position - contactPoint).normalized;
         away.y = 0;
         away.Normalize();
 
-        // Combine with upward direction for 45-degree angle
-        Vector3 launchDir = (away + Vector3.up * 0.5f).normalized;
-        float launchSpeed = currentSpeed * 0.8f;
+        float cameraAngle = Vector3.Angle(cameraTransform.forward, Vector3.up);
+        float verticalFactor = Mathf.Clamp01(cameraAngle / 90f);
+        Vector3 launchDir = (away * (1 - verticalFactor * 0.5f) + Vector3.up * (0.3f + verticalFactor * 0.7f)).normalized;
+
+        float speedFactor = Mathf.Clamp01(currentSpeed / wallRunMaxSpeed);
+        float launchSpeed = Mathf.Lerp(5f, currentSpeed * 0.8f, speedFactor);
 
         velocity = launchDir * launchSpeed;
         verticalVelocity = velocity.y;
@@ -741,7 +1089,7 @@ public class PlayerMovement : MonoBehaviour
         EndWallRun();
         wallRunCooldownTimer = wallRunCooldown;
 
-        if (enableDebugLogs) Debug.Log($"FORCED WALL KICKOFF - Speed: {launchSpeed:F1}");
+        SmartLog($"FORCED WALL KICKOFF - Angle: {cameraAngle:F1}°, Speed: {launchSpeed:F1}");
     }
 
     void WallRunJump()
@@ -751,8 +1099,13 @@ public class PlayerMovement : MonoBehaviour
         away.y = 0;
         away.Normalize();
 
-        Vector3 launchDir = (away + Vector3.up * 0.6f).normalized;
-        float launchSpeed = currentSpeed * 0.9f + wallRunJumpForce * 0.5f;
+        float cameraAngle = Vector3.Angle(cameraTransform.forward, Vector3.up);
+        float verticalFactor = Mathf.Clamp01(cameraAngle / 90f);
+        Vector3 launchDir = (away * (1 - verticalFactor * 0.4f) + Vector3.up * (0.4f + verticalFactor * 0.6f)).normalized;
+
+        float speedFactor = Mathf.Clamp01(currentSpeed / wallRunMaxSpeed);
+        float jumpBonus = Mathf.Lerp(2f, wallRunJumpForce * 0.8f, speedFactor);
+        float launchSpeed = currentSpeed * 0.7f + jumpBonus;
 
         velocity = launchDir * launchSpeed;
 
@@ -769,15 +1122,16 @@ public class PlayerMovement : MonoBehaviour
 
         EndWallRun();
         wallRunCooldownTimer = wallRunCooldown;
-        if (enableDebugLogs) Debug.Log($"WALL JUMP! Speed: {momentumSpeed:F1}");
+        SmartLog($"WALL JUMP - Angle: {cameraAngle:F1}°, Speed: {momentumSpeed:F1}");
     }
 
-        void CoyoteWallJump()
+    void CoyoteWallJump()
     {
-        // For coyote jump, we don't have current wall contact, so use last wall normal and position approximation
         Vector3 away = Vector3.ProjectOnPlane(-lastWallNormal, Vector3.up).normalized;
-        Vector3 launchDir = (away + Vector3.up * 0.5f).normalized;
-        float launchSpeed = (momentumSpeed > 0 ? momentumSpeed : currentSpeed) * 0.7f + wallRunJumpForce * 0.3f;
+        float cameraAngle = Vector3.Angle(cameraTransform.forward, Vector3.up);
+        float verticalFactor = Mathf.Clamp01(cameraAngle / 90f);
+        Vector3 launchDir = (away * (1 - verticalFactor * 0.4f) + Vector3.up * (0.3f + verticalFactor * 0.7f)).normalized;
+        float launchSpeed = (momentumSpeed > 0 ? momentumSpeed : currentSpeed) * 0.6f + wallRunJumpForce * 0.3f;
 
         velocity = launchDir * launchSpeed;
         verticalVelocity = velocity.y;
@@ -786,19 +1140,16 @@ public class PlayerMovement : MonoBehaviour
         momentumSpeed = launchSpeed * 0.7f;
         momentumDirection = away;
 
-        if (enableDebugLogs) Debug.Log($"COYOTE JUMP! Speed: {momentumSpeed:F1}");
+        SmartLog($"COYOTE JUMP - Angle: {cameraAngle:F1}°, Speed: {momentumSpeed:F1}");
     }
 
-    // Helper to get the closest point on the current wall (using raycast)
     Vector3 GetClosestPointOnWall()
     {
         RaycastHit hit;
-        // Cast from player position towards the wall (opposite of wallNormal)
         if (Physics.Raycast(transform.position, -wallNormal, out hit, wallCheckDistance + 1f, wallLayer))
         {
             return hit.point;
         }
-        // Fallback: approximate point 0.5m away in the wall normal direction
         return transform.position + wallNormal * 0.5f;
     }
 
@@ -808,7 +1159,26 @@ public class PlayerMovement : MonoBehaviour
         lastWallRunDir = wallRunDirection;
         lastWallRunEndTime = Time.time;
 
-        // No extra hop here – kickoff is handled separately
+        if (isVerticalWallRun)
+        {
+            canHorizontalAfterVertical = true;
+            verticalEndTime = Time.time;
+            SmartLog($"Vertical wallrun ended - horizontal possible within {verticalToHorizontalWindow}s");
+        }
+        else if (wasForwardWallrun)
+        {
+            canBackwardsWallrun = true;
+            previousWallNormal = wallNormal;
+            previousWallPosition = GetClosestPointOnWall();
+            previousWallRunEndTime = Time.time;
+            // previousWallCollider already set during StartWallRun
+            SmartLog($"Wallrun ended - backwards window open for {backwardsWallrunWindow}s");
+        }
+        else
+        {
+            previousWallCollider = null;
+        }
+
         isWallRunning = false;
         if (isVerticalWallRun) verticalWallRunCooldownTimer = verticalWallRunCooldown;
         isVerticalWallRun = false;
@@ -828,18 +1198,21 @@ public class PlayerMovement : MonoBehaviour
         return 20f;
     }
 
-    // --- Slide methods with fair chain penalties (no exponential decay) ---
-    void StartSlide(Vector3 direction)
+    void StartSlide(Vector3 direction, bool onSlope, float slopeAngle)
     {
         if (slideCooldownTimer > 0) return;
 
         isSliding = true;
         slideTimer = slideDuration;
         wasJumpCancelled = false;
+        wasSlidingOnSlope = onSlope;
+        isUphillSliding = false;
 
         slideCount++;
         float slidePenalty = Mathf.Max(0.3f, 1f - (slideCount - 1) * slideDecayRate);
         float currentHorizontalSpeed = hasMomentum && momentumSpeed > currentSpeed ? momentumSpeed : new Vector3(velocity.x, 0, velocity.z).magnitude;
+        if (currentHorizontalSpeed < 0.1f && velocity.magnitude > 0.1f)
+            currentHorizontalSpeed = velocity.magnitude;
 
         float slideStartSpeed = currentHorizontalSpeed < maxSlideGainSpeed ?
             Mathf.Min(currentHorizontalSpeed + (slideBoost * slidePenalty), maxSlideGainSpeed) : currentHorizontalSpeed;
@@ -848,6 +1221,8 @@ public class PlayerMovement : MonoBehaviour
         momentumSpeed = slideStartSpeed;
         momentumDirection = direction;
         slideDirection = direction;
+        slideForwardDir = direction;
+        slideRightDir = Vector3.Cross(Vector3.up, direction).normalized;
 
         velocity = new Vector3(direction.x, velocity.y, direction.z) * slideStartSpeed;
         currentSpeed = slideStartSpeed;
@@ -858,62 +1233,111 @@ public class PlayerMovement : MonoBehaviour
 
         currentChainTension = Mathf.Max(0, currentChainTension - slideResetChain);
 
-        if (enableDebugLogs) Debug.Log($"SLIDE #{slideCount} - Speed: {currentHorizontalSpeed:F1} → {slideStartSpeed:F1}");
+        SmartLog($"SLIDE #{slideCount} - OnSlope: {onSlope}, SlopeAngle: {slopeAngle:F1}°, Speed: {currentHorizontalSpeed:F1} → {slideStartSpeed:F1}");
     }
 
-    void UpdateSlide()
+    void UpdateSlide(float inputHorizontal, float inputVertical)
     {
-        if (!controller.isGrounded)
+        if (!controller.isGrounded && !wasSlidingOnSlope)
         {
+            SmartLog("Slide ended - left ground while not on slope");
             EndSlide();
             return;
         }
 
         slideTimer -= Time.deltaTime;
-        if (slideTimer <= 0f)
-        {
-            EndSlide();
-            return;
-        }
 
         RaycastHit groundHit;
-        if (!Physics.Raycast(transform.position + Vector3.up * 0.1f, Vector3.down, out groundHit, 2f))
+        bool hitGround = Physics.Raycast(transform.position + Vector3.up * 0.1f, Vector3.down, out groundHit, 2f);
+        if (!hitGround)
         {
+            SmartLog("Slide ended - no ground beneath");
             EndSlide();
             return;
         }
 
         float slopeAngle = Vector3.Angle(groundHit.normal, Vector3.up);
         bool onSlope = slopeAngle > minSlopeAngle;
+        wasSlidingOnSlope = onSlope;
 
-        Vector3 slideDirOnPlane = Vector3.ProjectOnPlane(slideDirection, groundHit.normal).normalized;
+        if (slideTimer <= 0f && !onSlope)
+        {
+            SmartLog($"Slide timer expired ({slideTimer:F2}), not on slope - ending");
+            EndSlide();
+            return;
+        }
+
         Vector3 slopeDown = Vector3.ProjectOnPlane(Vector3.down, groundHit.normal).normalized;
+        Vector3 slideDirOnPlane = Vector3.ProjectOnPlane(slideForwardDir, groundHit.normal).normalized;
         float dotWithDownhill = Vector3.Dot(slideDirOnPlane, slopeDown);
         bool slidingDownhill = onSlope && dotWithDownhill > 0.2f;
         bool slidingUphill = onSlope && dotWithDownhill < -0.2f;
 
         if (onSlope)
         {
-            float slopeFactor = Mathf.Clamp01((slopeAngle - minSlopeAngle) / (75f - minSlopeAngle));
+            // Only forward/back input affects direction on slopes
+            if (Mathf.Abs(inputVertical) > 0.1f)
+            {
+                Vector3 inputDir = cameraTransform.forward * inputVertical;
+                inputDir.y = 0;
+                inputDir.Normalize();
+                slideForwardDir = Vector3.Lerp(slideForwardDir, inputDir, Time.deltaTime * slideSteeringFactor * 0.5f).normalized;
+            }
+        }
+        else
+        {
+            Vector3 inputDir = (cameraTransform.forward * inputVertical) + (cameraTransform.right * inputHorizontal);
+            inputDir.y = 0;
+            if (inputDir.magnitude > 0.1f)
+            {
+                inputDir.Normalize();
+                slideForwardDir = Vector3.Lerp(slideForwardDir, inputDir, Time.deltaTime * slideSteeringFactor * 4f).normalized;
+            }
+        }
 
+        slideDirOnPlane = Vector3.ProjectOnPlane(slideForwardDir, groundHit.normal).normalized;
+
+        if (onSlope)
+        {
+            float slopeFactor = Mathf.Clamp01((slopeAngle - minSlopeAngle) / (75f - minSlopeAngle));
             if (slidingDownhill)
             {
-                momentumSpeed += slopeSlideGravity * slopeFactor * Time.deltaTime;
-                momentumSpeed += slopeFactor * slopeBoostMultiplier * slideBoost * Time.deltaTime;
+                float slopeGain = slopeSlideGravity * slopeFactor * Time.deltaTime;
+                float extraBoost = slopeFactor * slopeBoostMultiplier * slideBoost * Time.deltaTime;
+                momentumSpeed += slopeGain + extraBoost;
                 momentumSpeed = Mathf.Min(momentumSpeed, maxSlopeSpeed);
-                momentumSpeed *= Mathf.Pow(slopeSlideFriction, Time.deltaTime);
+                slideTimer = slideDuration;
+                isUphillSliding = false;
+                SmartLog($"Slope slide downhill - Angle: {slopeAngle:F1}°, Gain: {slopeGain+extraBoost:F2}, Speed: {momentumSpeed:F1}");
             }
             else if (slidingUphill)
             {
-                momentumSpeed = Mathf.Max(momentumSpeed - uphillSlowdown * slopeFactor * Time.deltaTime, walkSpeed);
+                momentumSpeed = Mathf.Max(momentumSpeed - uphillSlowdown * slopeFactor * Time.deltaTime, 0);
+                isUphillSliding = true;
+                SmartLog($"Slope slide uphill - slowing to {momentumSpeed:F1}");
+
+                if (momentumSpeed < uphillReverseThreshold)
+                {
+                    slideForwardDir = slopeDown;
+                    momentumSpeed = Mathf.Max(momentumSpeed, 2f);
+                    SmartLog("Uphill slide reversed - now going downhill");
+                }
+            }
+            else
+            {
+                isUphillSliding = false;
             }
 
-            slideDirOnPlane = Vector3.Lerp(slideDirOnPlane, slopeDown, slopeFactor * 0.4f);
+            Vector3 stickForce = (groundHit.normal * -slopeStickForce) * Time.deltaTime;
+            controller.Move(stickForce);
+            velocity.y = Mathf.Max(velocity.y, -2f);
         }
-
-        // Natural speed decay during slide
-        float speedDecay = deceleration * 0.6f * Time.deltaTime;
-        momentumSpeed = Mathf.Max(momentumSpeed - speedDecay, walkSpeed * 0.8f);
+        else
+        {
+            float speedDecay = deceleration * 0.6f * Time.deltaTime;
+            momentumSpeed = Mathf.Max(momentumSpeed - speedDecay, walkSpeed * 0.8f);
+            isUphillSliding = false;
+        }
 
         currentSpeed = momentumSpeed;
         Vector3 move = slideDirOnPlane * currentSpeed;
@@ -921,8 +1345,7 @@ public class PlayerMovement : MonoBehaviour
         velocity.x = move.x;
         velocity.z = move.z;
 
-        if (onSlope)
-            velocity.y += -gravity * slopeAttachForce * Time.deltaTime;
+        slideDirection = slideForwardDir;
     }
 
     void CancelSlideWithMomentum()
@@ -935,11 +1358,12 @@ public class PlayerMovement : MonoBehaviour
         isSliding = false;
         slideCooldownTimer = slideCooldown;
         lastSlideTime = Time.time;
+        wasSlidingOnSlope = false;
 
         controller.height = originalHeight;
         controller.center = new Vector3(0, originalCenterY, 0);
         cameraTransform.localPosition = new Vector3(cameraTransform.localPosition.x, originalCameraHeight, cameraTransform.localPosition.z);
-        if (enableDebugLogs) Debug.Log($"Slide cancelled! Momentum: {momentumSpeed:F1}");
+        SmartLog($"Slide cancelled! Momentum: {momentumSpeed:F1}");
     }
 
     void EndSlide()
@@ -947,6 +1371,8 @@ public class PlayerMovement : MonoBehaviour
         isSliding = false;
         slideCooldownTimer = slideCooldown;
         lastSlideTime = Time.time;
+        wasSlidingOnSlope = false;
+        isUphillSliding = false;
 
         float currentSlideSpeed = new Vector3(velocity.x, 0, velocity.z).magnitude;
         if (currentSlideSpeed > walkSpeed)
@@ -961,9 +1387,33 @@ public class PlayerMovement : MonoBehaviour
         controller.height = originalHeight;
         controller.center = new Vector3(0, originalCenterY, 0);
         cameraTransform.localPosition = new Vector3(cameraTransform.localPosition.x, originalCameraHeight, cameraTransform.localPosition.z);
+        SmartLog($"Slide ended - final speed: {currentSlideSpeed:F1}");
     }
 
-    // Public accessors
+    void SmartLog(string message)
+    {
+        if (!enableDebugLogs) return;
+
+        string key = message.Substring(0, Mathf.Min(message.Length, 50));
+
+        if (!messageCounts.ContainsKey(key))
+        {
+            messageCounts[key] = 0;
+            messageLastTime[key] = 0f;
+        }
+
+        if (Time.time - messageLastTime[key] > messageThrottleWindow)
+            messageCounts[key] = 0;
+
+        if (messageCounts[key] < maxMessageRepeats)
+        {
+            Debug.Log(message);
+            messageCounts[key]++;
+            messageLastTime[key] = Time.time;
+            lastDebugLogTime = Time.time;
+        }
+    }
+
     public bool IsRunning() => isRunning;
     public bool IsSliding() => isSliding;
     public bool IsWallRunning() => isWallRunning;
